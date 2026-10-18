@@ -9,3 +9,5 @@ An isometric birds-eye view map of your world.
 Credits:
   Programming: Ellie Gordon
   Art: Juniloaf
+
+https://modrinth.com/project/sIle6Qu6
