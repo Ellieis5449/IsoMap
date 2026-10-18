@@ -154,7 +154,7 @@ public class CreateTileImage {
         else if (block instanceof ButtonBlock) s.face(tex, 1, 1, 1, 1, 1, 1, 1, 0);
         else if (block instanceof LeverBlock) s.face(tex, 1, 0, 1, 1, 7, 7, 1, 0);
         else if (block instanceof LadderBlock || block instanceof EndRodBlock) s.face(tex, 1, 2, 2, 2, FRONT);
-        else if (block instanceof RedStoneWireBlock) s.redstoneWire(tex);
+        else if (block instanceof RedstoneWireBlock) s.redstoneWire(tex);
         else if (block instanceof RepeaterBlock || block instanceof ComparatorBlock) s.face(tex, 1, 2, 2, 2, 7, 7, 1, 0);
         else if (block instanceof IronBarsBlock) s.fillAverage(tex, 1, 1, 2, 2, 0);
         else if (block instanceof ChainBlock) s.fillAverage(tex, 1, 1, 1, 2, 0);
@@ -510,7 +510,8 @@ public class CreateTileImage {
             if (name.startsWith("spruce")) return SPRUCE_TINT;
             if (name.startsWith("mangrove")) return MANGROVE_TINT;
             if (name.startsWith("azalea") || name.startsWith("flowering_azalea")
-                    || name.startsWith("cherry") || name.startsWith("pale_oak")) return 0;
+                    || name.startsWith("cherry") || name.startsWith("pale_oak") || name.startsWith("red_poplar")
+                    || name.startsWith("orange_poplar") || name.startsWith("yellow_poplar")) return 0;
             return FOLIAGE_TINT;
         }
         return switch (name) {

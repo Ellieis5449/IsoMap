@@ -76,7 +76,7 @@ public class IsomapClient implements ClientModInitializer {
         KeyMapping openScreenKey = KeyMappingHelper.registerKeyMapping(
                 new KeyMapping(
                         "key.example-mod.send_to_chat",
-                        InputConstants.Type.KEYSYM,
+                        InputConstants.Type.KEYBOARD,
                         InputConstants.KEY_SEMICOLON,
                         CATEGORY
                 ));
