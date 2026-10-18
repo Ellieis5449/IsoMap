@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "isomap",
+  "version": "${version}",
+
+  "name": "IsoMap",
+  "description": "An isometric birds-eye view map of your world.\n\nProgramming: Ellie Gordon\nArt: Juniloaf",
+
+  "license": "All-Rights-Reserved",
+  "icon": "assets/icon.png",
+
+  "environment": "client",
+  "entrypoints": {
+    "main": ["lgbt.elizabeth.isomap.Isomap"],
+    "client": ["lgbt.elizabeth.isomap.client.IsomapClient"],
+    "modmenu": ["lgbt.elizabeth.isomap.client.config.IsoMapModMenu"]
+  },
+
+  "mixins": [
+    "isomap.mixins.json",
+    {
+      "config": "isomap.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
+
