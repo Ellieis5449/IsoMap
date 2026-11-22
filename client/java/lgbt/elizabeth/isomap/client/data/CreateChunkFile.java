@@ -9,26 +9,38 @@ import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.LightLayer;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.storage.LevelResource;
+import org.jspecify.annotations.NonNull;
 
 import java.io.*;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
-import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.zip.GZIPInputStream;
-import java.util.zip.GZIPOutputStream;
 import java.util.ArrayDeque;
 
 public class CreateChunkFile {
 
     //Full Air Section
-    private static final int[][][] AIR = new int[16][16][16];
+    private static final String[][][] AIR = new String[16][16][16];
+    static {
+        for (String[][] plane : AIR)
+            for (String[] row : plane)
+                Arrays.fill(row, "minecraft:air");
+    }
 
 
     //getMaxYSection
@@ -89,32 +101,22 @@ public class CreateChunkFile {
                 level.getBrightness(LightLayer.SKY, p));
     }
 
-    public static int[][][] readChunk(int cx, int cz, int cy) {
+    public static String[][][] readChunkBlocks(int sx, int sz, int sy) {
 
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
+        if (level == null) return null;
 
-        if (level == null) {
-            return null;
-        }
-
-        LevelChunk chunk = level.getChunkSource().getChunk(cx, cz, ChunkStatus.FULL, false);
-        if (chunk == null) {
-            return null;
-        }
+        LevelChunk chunk = level.getChunkSource().getChunk(sx, sz, ChunkStatus.FULL, false);
+        if (chunk == null) return null;
 
         LevelChunkSection[] sections = chunk.getSections();
-        if (cy < 0 || cy >= sections.length) {
-            return null;
-        }
+        if (sy < 0 || sy >= sections.length) return null;
 
-        LevelChunkSection section = sections[cy];
-        if (section.hasOnlyAir()) return AIR;
+        LevelChunkSection section = sections[sy];
+        if (section.hasOnlyAir()) return AIR;   // AIR must now be a String[][][] too
 
-        int[][][] blocks = new int[16][16][16];
-        BlockPos.MutableBlockPos mp = new BlockPos.MutableBlockPos();
-        int baseX = cx << 4, baseZ = cz << 4;
-        int baseY = (chunk.getMinSectionY() + cy) << 4;
+        String[][][] blocks = new String[16][16][16];
 
         for (int x = 0; x < 16; x++) {
             for (int y = 0; y < 16; y++) {
@@ -122,35 +124,73 @@ public class CreateChunkFile {
                     BlockState s = section.getBlockState(x, y, z);
                     if (s.isAir()) continue;
 
-                    int id = BuiltInRegistries.BLOCK.getId(s.getBlock());
-                    int wx = baseX + x, wy = baseY + y, wz = baseZ + z;
-
-                    int light = 0;
-                    for (int ox = 0; ox <= 1; ox++)
-                        for (int oy = 0; oy <= 1; oy++)
-                            for (int oz = 0; oz <= 1; oz++) {
-                                if (ox + oy + oz == 0) continue;
-                                light = Math.max(light, getBlockLightLevel(level, mp, wx + ox, wy + oy, wz + oz));
-                            }
-
-                    blocks[x][y][z] = (light << 12) | id;
+                    blocks[x][y][z] = BuiltInRegistries.BLOCK.getKey(s.getBlock()).toString();
                 }
             }
         }
         return blocks;
     }
 
+    public static String[][][] readChunkBiomes(int sx, int sz, int sy) {
+
+        Minecraft mc = Minecraft.getInstance();
+        ClientLevel level = mc.level;
+        if (level == null) return null;
+
+        LevelChunk chunk = level.getChunkSource().getChunk(sx, sz, ChunkStatus.FULL, false);
+        if (chunk == null) return null;
+
+        LevelChunkSection[] sections = chunk.getSections();
+        if (sy < 0 || sy >= sections.length) return null;
+
+        LevelChunkSection section = sections[sy];
+
+        String[][][] biomes = new String[4][4][4];
+
+        for (int x = 0; x < 4; x++) {
+            for (int y = 0; y < 4; y++) {
+                for (int z = 0; z < 4; z++) {
+                    Holder<Biome> holder = section.getNoiseBiome(x, y, z);
+
+                    biomes[x][y][z] = holder.unwrapKey()
+                            .map(key -> key.identifier().toString())
+                            .orElse("minecraft:plains");
+                }
+            }
+        }
+        return biomes;
+    }
+
 
     //Saving Chunks
-    public static void encodeSection(int cx, int cz, int cy, float modVer) throws FileNotFoundException {
+    public static void encodeSection(int sx, int sz, int sy, float modVer) throws FileNotFoundException {
 
-        int[][][] blocks = readChunk(cx, cz, cy);
+        String[][][] blocks = readChunkBlocks(sx, sz, sy);
+        String[][][] biomes = readChunkBiomes(sx, sz, sy);
+
         if (blocks == null) return;
 
         if (IsoMapConfig.repSolidSecAir) {
-            if (isFullyEnclosed(cx, cz, cy, blocks)) return;
+            if (isFullyEnclosed(sx, sz, sy, blocks)) return;
         }
 
+        Path fileDirectory = getPath(sx, sz, sy);
+        if (Files.notExists(fileDirectory)) {
+            OrganizeData.createFops(sx, sy, sz, modVer, fileDirectory);
+        }
+
+        byte[] light = readChunkLight(sx, sz, sy);
+        byte[] sectionData = OrganizeData.serializeSection(blocks, biomes, light, modVer);
+        try {
+            OrganizeData.modifyFopsSection(fileDirectory, sx, sy, sz, sectionData);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+
+    }
+
+    private static @NonNull Path getPath(int sx, int sz, int sy) {
         String worldName = getWorldIdentifier();
 
         String seed = IsomapClient.getSeedString();
@@ -160,38 +200,10 @@ public class CreateChunkFile {
         Path configDirectory = FabricLoader.getInstance().getConfigDir();
         Path worldDirectory = configDirectory.resolve("IsoMap/" + worldName + "/" + seed + "/" + dimension);
 
-        try {
-            Files.createDirectories(worldDirectory);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
+        int rx = sx >> 3, ry = sy >> 3, rz = sz >> 3;
+        String fileName = "r." + rx + "." + ry + "." + rz + ".fops";
 
-        Path chunkFilePath = worldDirectory.resolve(cx + "_" + cz + "_" + cy + ".fops");
-
-        try (FileOutputStream fos = new FileOutputStream(chunkFilePath.toFile());
-             GZIPOutputStream gzip = new GZIPOutputStream(fos);
-             DataOutputStream out = new DataOutputStream(gzip)) {
-
-            out.writeBytes("IsoMap Alpha " + modVer);
-
-            int worldY;
-
-            for (int x = 0; x < 16; x++) {
-                for (int y = 0; y < 16; y++) {
-                    for (int z = 0; z < 16; z++) {
-                        worldY = cy * 16 + y;
-                        if (IsoMapConfig.saveSectionedY && (worldY < IsoMapConfig.minSectionedYBlock || worldY > IsoMapConfig.maxSectionedYBlock)) {
-                            out.writeShort(0);
-                        }
-                        else {
-                            out.writeShort(blocks[x][y][z]);
-                        }
-                    }
-                }
-            }
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
+        return worldDirectory.resolve(fileName);
     }
 
     public static void saveRenderDist(int playerX, int playerZ, float modVer) {
@@ -207,14 +219,14 @@ public class CreateChunkFile {
             renderDistance -= (renderDistance/2);
         }
 
-        for (int cy = 0; cy <= maxCy; cy++) {
-            for (int cx = playerX + renderDistance; cx >= playerX - renderDistance; cx--) {
-                for (int cz = playerZ + renderDistance; cz >= playerZ - renderDistance; cz--) {
-
+        for (int sy = 0; sy <= maxCy; sy++) {
+            for (int sx = playerX + renderDistance; sx >= playerX - renderDistance; sx--) {
+                for (int sz = playerZ + renderDistance; sz >= playerZ - renderDistance; sz--) {
                     try {
-                        encodeSection(cx, cz, cy, modVer);
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
+                        encodeSection(sx, sz, sy, modVer);
+                    } catch (Throwable t) {
+                        System.err.println("encodeSection failed at " + sx + "," + sz + "," + sy);
+                        t.printStackTrace();
                     }
                 }
             }
@@ -222,8 +234,10 @@ public class CreateChunkFile {
     }
 
 
+
+    public record RegionParse(long key, int[] blockData, int[] biomeData, byte[] lightData) {}
     //Loading Chunks
-    public static int[][][] decodeSection(int cx, int cz, int cy) {
+    public static RegionParse[] decodeRegion(int rx, int rz, int ry) throws IOException {
 
         String worldName = getWorldIdentifier();
 
@@ -234,84 +248,200 @@ public class CreateChunkFile {
         Path configDirectory = FabricLoader.getInstance().getConfigDir();
         Path worldDirectory = configDirectory.resolve("IsoMap/" + worldName + "/" + seed + "/" + dimension);
 
-        Path chunkFilePath = worldDirectory.resolve(cx + "_" + cz + "_" + cy + ".fops");
+        String fileName = "r." + rx + "." + ry + "." + rz + ".fops";
 
-        int[][][] blocks = new int[16][16][16];
-        try (FileInputStream fis = new FileInputStream(chunkFilePath.toFile());
-             GZIPInputStream gzip = new GZIPInputStream(fis);
-             DataInputStream in = new DataInputStream(gzip)) {
+        Path fileDirectory = worldDirectory.resolve(fileName);
 
-            in.skipNBytes(16);
+        byte[] fops = Files.readAllBytes(fileDirectory);
 
-            int worldY;
+        int[] offsets = new int[512];
 
+        ByteBuffer fb = ByteBuffer.wrap(fops);
+        for (int slot = 0; slot < 512; slot++) {
+            int pos = 4 + slot * 6;
+            offsets[slot] = fb.getInt(pos);
+        }
+
+        RegionParse[] regionData = new RegionParse[512];
+
+        for (int i = 0; i < 512; i++) {
+            long key = (OrganizeData.morton(rx, ry, rz) << 9) | i;
+            int offset = offsets[i];
+            if (offset == -1) continue;
+
+            int n = fb.getShort(offset) & 0xFFFF;
+            int m = fb.get(offset + 2 + n * 6) & 0xFF;
+
+            int bodyLenPos = offset + 2 + n * 6 + 1 + m * 6;
+            int bodyLen = fb.getInt(bodyLenPos);
+            int bodyStart = bodyLenPos + 4 + 1 + 4;
+
+            byte[] body = Arrays.copyOfRange(fops, bodyStart, bodyStart + bodyLen);
+
+            int depthByte = fb.get(bodyLenPos + 4) & 0xFF;
+
+            int blockDepth = depthByte >> 4;
+            int biomeDepth = depthByte & 0x0F;
+
+            byte[] raw;
+            try (GZIPInputStream gz = new GZIPInputStream(new ByteArrayInputStream(body))) {
+                raw = gz.readAllBytes();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+
+
+            int[] blockPalette = new int[n];
+            for (int p = 0; p < n; p++) {
+                blockPalette[p] = fb.getInt(offset + 2 + p * 6);   // the id; the short after it is just p
+            }
+
+            int biomePaletteStart = offset + 2 + n * 6 + 1;
+
+            int[] biomePalette = new int[m];
+            for (int p = 0; p < m; p++) {
+                biomePalette[p] = fb.getInt(biomePaletteStart + p * 6);
+            }
+
+
+            int[] blockIndices = new int[4096];
+            for (int i1 = 0; i1 < 4096; i1++) {
+                blockIndices[i1] = readIndex(raw, i1 * blockDepth, blockDepth);
+            }
+
+            int biomeStart = 4096 * blockDepth;
+            int[] biomeIndices = new int[64];
+            for (int i1 = 0; i1 < 64; i1++) {
+                biomeIndices[i1] = readIndex(raw, biomeStart + i1 * biomeDepth, biomeDepth);
+            }
+
+            int[] blockIds = new int[4096];
+            for (int i1 = 0; i1 < 4096; i1++) {
+                blockIds[i1] = blockPalette[blockIndices[i1]];
+            }
+
+            int[] biomeIds = new int[64];
+            for (int i1 = 0; i1 < 64; i1++) {
+                biomeIds[i1] = biomePalette[biomeIndices[i1]];
+            }
+
+            int lightStart = biomeStart + 64 * biomeDepth;
+            byte[] light = new byte[4096];
+            if (raw.length >= lightStart + 4096) System.arraycopy(raw, lightStart, light, 0, 4096);
+
+            regionData[i] = new RegionParse(key, blockIds, biomeIds, light);
+
+
+        }
+
+        return regionData;
+    }
+
+    public static CombinedRegion combineRegion(CreateChunkFile.RegionParse[] region) {
+
+        int[][][] blocks = new int[128][128][128];
+        int[][][] biomes = new int[32][32][32];
+
+        for (CreateChunkFile.RegionParse s : region) {
+            if (s == null) continue;
+
+
+            int slot = (int) (s.key() & 511);
+            int lx = compact(slot);
+            int ly = compact(slot >> 1);
+            int lz = compact(slot >> 2);
+
+            //blocks
+            int bx = lx * 16, by = ly * 16, bz = lz * 16;
+            int[] ids = s.blockData();
+            byte[] lt = s.lightData();
             for (int x = 0; x < 16; x++) {
                 for (int y = 0; y < 16; y++) {
                     for (int z = 0; z < 16; z++) {
-                        worldY = cy * 16 + y;
-                        if (worldY < IsoMapConfig.minSectionedYBlock || worldY > IsoMapConfig.maxSectionedYBlock) {
-                            blocks[x][y][z] = in.readUnsignedShort();
-                            blocks[x][y][z] = 0;
-                        }
-                        else {
-                            blocks[x][y][z] = in.readUnsignedShort();
-                        }
+                        int n = x * 256 + y * 16 + z;
+                        blocks[bx + x][by + y][bz + z] = (ids[n] & 0xFFF) | ((lt[n] & 0xF) << 12);
                     }
                 }
             }
 
-        return blocks;
-
-        } catch (NoSuchFileException | EOFException e) {
-            return null;
-        } catch (IOException e) {
-            e.printStackTrace();
+            //biomes
+            int cx = lx * 4, cy = ly * 4, cz = lz * 4;
+            int[] bio = s.biomeData();
+            for (int x = 0; x < 4; x++) {
+                for (int y = 0; y < 4; y++) {
+                    for (int z = 0; z < 4; z++) {
+                        biomes[cx + x][cy + y][cz + z] = bio[x * 16 + y * 4 + z];
+                    }
+                }
+            }
         }
-        return null;
+
+        return new CombinedRegion(blocks, biomes);
+    }
+
+    public record CombinedRegion(int[][][] blocks, int[][][] biomes) {}
+
+    public static int compact(int v) {
+        v &= 0b001001001;                    // bits 0, 3, 6
+        v = (v | (v >> 2)) & 0b1000011;      // keep bits 0, 1, 6
+        v = (v | (v >> 4)) & 0b0000111;      // bit 6 -> bit 2
+        return v;
+    }
+
+
+
+    static int readIndex(byte[] data, int pos, int depth) {
+        int value = 0;
+        for (int k = 0; k < depth; k++) {
+            value = (value << 8) | (data[pos + k] & 0xFF);
+        }
+        return value;
     }
 
 
     //Lighting
-    public static int[] TRANSPARENT_IDS = {
-            0,25,26,27,28,29,30,31,32,35,88,89,90,91,92,93,94,95,96,97,98,101,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,
-            130,131,132,133,134,135,136,137,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,180,181,182,183,184,185,186,187,188,189,
-            190,191,192,194,195,196,197,202,207,210,211,212,213,214,215,216,217,218,219,220,221,222,224,225,226,227,228,229,230,231,232,233,234,235,236,237,
-            238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,273,274,275,
-            276,277,280,282,284,290,291,292,293,295,298,299,300,301,302,303,304,305,306,307,308,309,310,311,312,313,314,315,316,317,318,319,320,321,322,323,
-            324,325,341,342,343,344,345,346,347,348,349,350,351,352,353,354,355,356,357,358,359,362,363,364,365,366,367,368,369,374,379,382,384,385,386,387,
-            388,389,390,391,392,394,396,401,402,408,409,410,411,412,413,414,415,416,417,418,419,420,421,422,423,424,425,426,427,428,429,430,431,432,433,434,
-            435,436,437,438,439,440,441,442,443,444,445,446,447,448,449,450,451,452,453,454,455,456,457,458,459,460,461,462,463,464,465,466,467,468,469,471,
-            472,473,474,477,482,500,501,502,503,504,505,506,507,508,509,510,511,512,513,514,515,523,524,525,526,538,539,540,541,542,543,544,545,546,547,548,
-            549,550,551,552,553,557,558,559,560,561,562,563,564,565,566,567,568,569,570,571,572,573,574,575,576,577,578,579,580,581,582,583,584,585,586,587,
-            588,589,590,591,592,593,594,599,600,601,602,603,604,605,606,607,608,609,610,611,612,613,614,615,616,617,618,619,620,621,622,623,628,629,630,631,
-            632,633,634,635,636,637,638,639,640,641,642,643,644,645,646,647,648,649,650,651,652,653,654,655,662,663,664,665,666,667,670,675,742,743,745,746,
-            747,758,759,760,761,762,763,764,765,766,767,768,769,770,771,772,773,774,775,776,777,778,779,780,781,782,783,784,785,786,787,788,790,791,792,793,
-            794,795,796,811,812,813,814,815,816,817,818,819,820,821,822,823,824,825,826,827,828,829,830,831,832,833,834,835,836,837,844,845,847,848,849,850,
-            851,852,853,854,855,856,857,858,859,860,861,866,867,869,870,875,876,878,879,880,881,882,885,886,887,888,889,890,891,892,893,894,897,898,899,900,
-            901,902,903,904,913,919,920,921,922,926,927,932,933,934,937,938,939,940,944,945,946,947,948,949,950,951,952,953,954,955,956,957,958,959,960,961,
-            962,963,964,965,966,967,968,969,970,971,972,973,974,975,976,977,978,979,980,981,982,983,985,987,989,991,994,996,1000,1002,1004,1006,1008,1010,
-            1013,1015,1017,1019,1021,1023,1026,1028,1029,1031,1032,1033,1068,1069,1070,1071,1072,1073,1074,1075,1076,1077,1078,1079,1080,1081,1082,1083,1084,
-            1085,1086,1087,1088,1089,1090,1091,1092,1093,1094,1095,1096,1097,1098,1099,1116,1117,1118,1119,1120,1121,1122,1123,1124,1125,1126,1127,1128,1129,
-            1130,1131,1133,1134,1135,1136,1137,1138,1139,1140,1141,1142,1143,1145,1146,1147,1148,1154,1155,1158,1159,1162,1163,1166,1167,1176,1177,1181,1183,
-            1185,1186,1187,1189,1190,1191,1192,1193,1194,1195
-    };
+    private static final Map<String, Boolean> TRANSPARENT_CACHE = new HashMap<>();
 
-    private static boolean[] buildTransparencyTable() {
-        int max = 0;
-
-        for (int id : TRANSPARENT_IDS) max = Math.max(max, id);
-        boolean[] lookup = new boolean[max + 1];
-        for (int id : TRANSPARENT_IDS) lookup[id] = true;
-        return lookup;
+    private static boolean isTransparentState(BlockState state) {
+        return state.isAir() || !state.isSolidRender();
     }
 
-    private static boolean isTransparent(int id) {
-        boolean[] transparentLookup = buildTransparencyTable();
+    public static byte[] readChunkLight(int sx, int sz, int sy) {
+        byte[] light = new byte[4096];
+        ClientLevel level = Minecraft.getInstance().level;
+        if (level == null) return light;
 
-        return id >= 0 && id < transparentLookup.length && transparentLookup[id];
+        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
+        int baseX = sx * 16, baseY = level.getMinY() + sy * 16, baseZ = sz * 16;
+
+        final int[] dx = {0, 1, -1, 0,  0, 0,  0};
+        final int[] dy = {0, 0,  0, 1, -1, 0,  0};
+        final int[] dz = {0, 0,  0, 0,  0, 1, -1};
+
+        int i = 0;
+        for (int x = 0; x < 16; x++)
+            for (int y = 0; y < 16; y++)
+                for (int z = 0; z < 16; z++) {
+                    int best = 0;
+                    for (int d = 0; d < 7 && best < 15; d++) {
+                        best = Math.max(best, getBlockLightLevel(level, p,
+                                baseX + x + dx[d], baseY + y + dy[d], baseZ + z + dz[d]));
+                    }
+                    light[i++] = (byte) best;
+                }
+        return light;
     }
 
-    private static boolean isFullyEnclosed(int cx, int cz, int cy, int[][][] blocks) {
+    private static boolean isTransparent(String name) {
+        if (name == null) return true;
+
+        return TRANSPARENT_CACHE.computeIfAbsent(name, n -> {
+            Block block = BuiltInRegistries.BLOCK.getValue(Identifier.parse(n));
+            return isTransparentState(block.defaultBlockState());
+        });
+    }
+
+    private static boolean isFullyEnclosed(int sx, int sz, int sy, String[][][] blocks) {
 
         boolean[] solid = new boolean[16 * 16 * 16];
         boolean anySolid = false;
@@ -320,11 +450,11 @@ public class CreateChunkFile {
         for (int x = 0; x < 16; x++) {
             for (int y = 0; y < 16; y++) {
                 for (int z = 0; z < 16; z++) {
-                    boolean isSolid = !isTransparent(blocks[x][y][z] & 0xFFF);
+                    boolean isSolid = !isTransparent(blocks[x][y][z]);
                     solid[blockIndex(x, y, z)] = isSolid;
                     anySolid |= isSolid;
 
-                    if (isSolid && isOnBoundary(x, y, z) && touchesOtherSection(cx, cz, cy, blocks, x, y, z)) {
+                    if (isSolid && isOnBoundary(x, y, z) && touchesOtherSection(sx, sz, sy, blocks, x, y, z)) {
                         return false;
                     }
                 }
@@ -341,7 +471,7 @@ public class CreateChunkFile {
                 for (int z = 0; z < 16; z++) {
                     int i = blockIndex(x, y, z);
                     if (solid[i] || openAir[i]) continue;
-                    if (touchesOtherSection(cx, cz, cy, blocks, x, y, z)) {
+                    if (touchesOtherSection(sx, sz, sy, blocks, x, y, z)) {
                         openAir[i] = true;
                         queue.add(i);
                     }
@@ -379,30 +509,28 @@ public class CreateChunkFile {
         return (x << 8) | (y << 4) | z;
     }
 
-    private static boolean isTransparentNeighbor(int cx, int cz, int cy, int[][][] blocks, int x, int y, int z) {
+    private static boolean isTransparentNeighbor(int sx, int sz, int sy, String[][][] blocks, int x, int y, int z) {
         if (x >= 0 && x <= 15 && y >= 0 && y <= 15 && z >= 0 && z <= 15) {
-            return isTransparent(blocks[x][y][z] & 0xFFF);
+            return isTransparent(blocks[x][y][z]);
         }
 
         ClientLevel level = Minecraft.getInstance().level;
         if (level == null) return true;
 
-        int wx = cx * 16 + x;
-        int wy = level.getMinY() + cy * 16 + y;
-        int wz = cz * 16 + z;
+        int wx = sx * 16 + x;
+        int wy = level.getMinY() + sy * 16 + y;
+        int wz = sz * 16 + z;
 
-        BlockState state = level.getBlockState(new BlockPos(wx, wy, wz));
-        int id = BuiltInRegistries.BLOCK.getId(state.getBlock());
-        return isTransparent(id);
+        return isTransparentState(level.getBlockState(new BlockPos(wx, wy, wz)));
     }
 
-    private static boolean touchesOtherSection(int cx, int cz, int cy, int[][][] blocks, int x, int y, int z) {
-        return (x == 0  && isTransparentNeighbor(cx, cz, cy, blocks, x - 1, y, z))
-                || (x == 15 && isTransparentNeighbor(cx, cz, cy, blocks, x + 1, y, z))
-                || (y == 0  && isTransparentNeighbor(cx, cz, cy, blocks, x, y - 1, z))
-                || (y == 15 && isTransparentNeighbor(cx, cz, cy, blocks, x, y + 1, z))
-                || (z == 0  && isTransparentNeighbor(cx, cz, cy, blocks, x, y, z - 1))
-                || (z == 15 && isTransparentNeighbor(cx, cz, cy, blocks, x, y, z + 1));
+    private static boolean touchesOtherSection(int sx, int sz, int sy, String[][][] blocks, int x, int y, int z) {
+        return (x == 0  && isTransparentNeighbor(sx, sz, sy, blocks, x - 1, y, z))
+                || (x == 15 && isTransparentNeighbor(sx, sz, sy, blocks, x + 1, y, z))
+                || (y == 0  && isTransparentNeighbor(sx, sz, sy, blocks, x, y - 1, z))
+                || (y == 15 && isTransparentNeighbor(sx, sz, sy, blocks, x, y + 1, z))
+                || (z == 0  && isTransparentNeighbor(sx, sz, sy, blocks, x, y, z - 1))
+                || (z == 15 && isTransparentNeighbor(sx, sz, sy, blocks, x, y, z + 1));
     }
 
 }

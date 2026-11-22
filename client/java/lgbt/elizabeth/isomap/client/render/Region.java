@@ -2,7 +2,6 @@ package lgbt.elizabeth.isomap.client.render;
 
 import com.mojang.blaze3d.platform.NativeImage;
 import lgbt.elizabeth.isomap.client.data.CreateChunkFile;
-import lgbt.elizabeth.isomap.client.config.IsoMapConfig;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.texture.DynamicTexture;
@@ -17,10 +16,16 @@ import lgbt.elizabeth.isomap.client.render.MapScreen.Tile;
 
 public class Region {
 
-    static final int R = 16;
+    static final int R = MapScreen.R;          // region size in chunks
 
-    int dirIndex = IsoMapConfig.direction;
-    boolean straight = (dirIndex % 2 == 0);
+    // Must match processSector's `n`
+    static final int N = 128;                  // blocks per tile side
+    static final int T = N / 16;               // chunks per tile side (8)
+    static final int ANCHOR = 2 * (N - 1);     // px offset of block (0,0,0) inside a tile image
+
+    final boolean straight = MapScreen.straight;
+    final int tileW = straight ? 2 * N : 4 * N;
+    final int tileH = 4 * N;
 
     final int rx, rz, ry;
     final int x0, y0, w, h;
@@ -33,6 +38,15 @@ public class Region {
     DynamicTexture tex;
     Identifier id;
 
+    // World-space (pre-region-offset) top-left of a tile image
+    private int tileLeft(int cx, int cz) {
+        return straight ? cx * 32 : (cx - cz) * 32 - ANCHOR;
+    }
+
+    private int tileTop(int cx, int cz, int idx) {
+        return (straight ? cz * 2 : cx + cz) * 16 - idx * 32 - ANCHOR;
+    }
+
     Region(int rx, int rz, int ry) {
         int maxCy = 0;
         ClientLevel level = Minecraft.getInstance().level;
@@ -41,12 +55,31 @@ public class Region {
         }
 
         this.rx = rx; this.rz = rz; this.ry = ry;
-        int cx0 = rx * R, cz0 = rz * R, cx1 = cx0 + R - 1, cz1 = cz0 + R - 1;
-        int idx0 = ry * R, idx1 = Math.min(idx0 + R - 1, maxCy);
-        x0 = (straight ? cx0 : cx0 - cz1) * 32;
-        y0 = (straight ? cz0 * 2 : cx0 + cz0) * 16 - idx1 * 32;
-        w  = (straight ? cx1 : cx1 - cz0) * 32 + (straight ? 32 : 64) - x0;
-        h  = (straight ? cz1 * 2 : cx1 + cz1) * 16 - idx0 * 32 + 64 - y0;
+
+        // Range of tile ORIGINS that can land in this region
+        int cx0 = rx * R, cx1 = cx0 + R - 1;
+        int cz0 = rz * R, cz1 = cz0 + R - 1;
+        int idx0 = ry * R;
+        // tile idx values are multiples of T, so the highest origin is idx0 + R - T
+        int idxMax = Math.max(idx0, Math.min(idx0 + R - T, maxCy));
+
+        // The mapping is linear, so the corners give the extremes
+        int minX = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE;
+        int minY = Integer.MAX_VALUE, maxY = Integer.MIN_VALUE;
+        for (int cx : new int[]{cx0, cx1}) {
+            for (int cz : new int[]{cz0, cz1}) {
+                int left = tileLeft(cx, cz);
+                minX = Math.min(minX, left);
+                maxX = Math.max(maxX, left);
+                minY = Math.min(minY, tileTop(cx, cz, idxMax)); // highest tile = smallest y
+                maxY = Math.max(maxY, tileTop(cx, cz, idx0));   // lowest tile = largest y
+            }
+        }
+
+        x0 = minX;
+        y0 = minY;
+        w = maxX - minX + tileW;
+        h = maxY - minY + tileH;
     }
 
     int[] compositeBuffer(List<Tile> tilesSnapshot, int maxVisibleIdx) {
@@ -55,20 +88,31 @@ public class Region {
         int[] buf = new int[w * h];
         int[] zbuf = new int[w * h];
         Arrays.fill(zbuf, Integer.MIN_VALUE);
+
         for (Tile t : tilesSnapshot) {
             if (t.idx() > maxVisibleIdx) continue;
+
             final int tw = t.w();
-            int base = 16 * ((straight ? t.cz() : t.cx() + t.cz()) + t.idx());
-            int ox = (straight ? t.cx() : t.cx() - t.cz()) * 32 - x0;
-            int oy = (straight ? t.cz() * 2 : t.cx() + t.cz()) * 16 - t.idx() * 32 - y0;
-            int[] src = t.argb();
-            byte[] tz = t.z();
-            for (int y = 0; y < 64; y++) {
-                int row = (oy + y) * w + ox;
+            final int[] src = t.argb();
+            final short[] tz = t.z();
+            final int th = src.length / tw;
+
+            final int base = 16 * ((straight ? t.cz() : t.cx() + t.cz()) + t.idx());
+            final int ox = tileLeft(t.cx(), t.cz()) - x0;
+            final int oy = tileTop(t.cx(), t.cz(), t.idx()) - y0;
+
+            for (int y = 0; y < th; y++) {
+                int ty = oy + y;
+                if (ty < 0 || ty >= h) continue;
+
                 for (int x = 0; x < tw; x++) {
+                    int tx = ox + x;
+                    if (tx < 0 || tx >= w) continue;
+
                     int s = src[y * tw + x];
                     if ((s >>> 24) == 0) continue;
-                    int i = row + x;
+
+                    int i = ty * w + tx;
                     int d = base + tz[y * tw + x];
                     if (d >= zbuf[i]) {
                         buf[i] = MapScreen.over(s, buf[i]);

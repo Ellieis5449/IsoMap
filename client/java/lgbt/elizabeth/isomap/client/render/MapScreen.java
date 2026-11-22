@@ -1,5 +1,7 @@
 package lgbt.elizabeth.isomap.client.render;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.mojang.blaze3d.platform.NativeImage;
 import lgbt.elizabeth.isomap.client.data.CreateChunkFile;
 import lgbt.elizabeth.isomap.client.IsomapClient;
@@ -13,10 +15,15 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.level.biome.Biome;
 import org.jspecify.annotations.NonNull;
 
 import java.io.FileNotFoundException;
+import java.io.InputStreamReader;
 import java.util.concurrent.*;
 
 
@@ -64,8 +71,8 @@ public class MapScreen extends Screen {
 
     private record SectionFile(Path path, int x, int z, int y) {}
 
-    private record TileResult(int rcx, int rcz, int idx, int w, int[] argb, byte[] z) {}
-    record Tile(int cx, int cz, int idx, int w, int[] argb, byte[] z) {
+    private record TileResult(int rcx, int rcz, int idx, int w, int[] argb, short[] z) {}
+    record Tile(int cx, int cz, int idx, int w, int[] argb, short[] z) {
         int depth() { return ((straight ? cz : cx + cz) * 32) + 2 * 16 * idx; }
     }
 
@@ -95,6 +102,8 @@ public class MapScreen extends Screen {
     private final List<Region> regionOrder = new ArrayList<>();
 
     private final Semaphore room = new Semaphore(2000);
+
+    private Map<Long, Long> columns = Map.of();
 
     public MapScreen(Component title) {
         super(title);
@@ -135,6 +144,8 @@ public class MapScreen extends Screen {
 
         if (mc.level != null) {
             CreateChunkFile.getMaxYSection(mc.level);
+            loadBiomes(mc.level);
+            loadBlockTints();
         }
 
         int chunkX = pos.getX() >> 4;
@@ -159,24 +170,60 @@ public class MapScreen extends Screen {
         if (workersStarted) return;
         workersStarted = true;
 
+        Thread h = getThread(chunkX, chunkZ, maxCells);
+        h.start();
+    }
+
+    private @NonNull Thread getThread(int chunkX, int chunkZ, long maxCells) {
         Thread t = new Thread(() -> CreateChunkFile.saveRenderDist(chunkX, chunkZ, IsomapClient.modVer));
         t.setDaemon(true);
         t.start();
 
         Thread h = new Thread(() -> {
             try {
-                renderAllSections(chunkX, chunkZ, originCx, originCz, maxCells);
+                Path dir = sectionDirectory();
+                Map<Long, Long> seen = new HashMap<>();
+                Map<Long, Long> prev = new HashMap<>();
+
+                while (open) {
+                    boolean writerDone = !t.isAlive();   // check BEFORE listing so nothing is missed
+                    Map<Long, Long> now = indexSections(dir);
+
+                    Map<Long, Long> fresh = new HashMap<>();
+                    for (var e : now.entrySet()) {
+                        long ready = writerDone ? e.getValue()
+                                : (e.getValue() & prev.getOrDefault(e.getKey(), 0L));
+                        long f = ready & ~seen.getOrDefault(e.getKey(), 0L);
+                        if (f != 0) fresh.put(e.getKey(), f);
+                    }
+                    prev = now;
+
+                    if (!fresh.isEmpty()) {
+                        columns = fresh;
+                        renderAllSections(chunkX, chunkZ, originCx, originCz, maxCells);
+                        for (var e : fresh.entrySet()) seen.merge(e.getKey(), e.getValue(), (a, b) -> a | b);
+                    }
+
+                    if (writerDone) break;
+                    Thread.sleep(250);
+                }
             } catch (IOException e) {
                 throw new RuntimeException(e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
         });
+
         h.setDaemon(true);
-        h.start();
+        return h;
     }
 
     //Thread cleanup
     @Override
     public void removed() {
+
+        if (tilesetImg != null) tilesetImg.close();
+
         open = false;
         for (Region r : regionOrder) {
             if (r.id != null) Minecraft.getInstance().getTextureManager().release(r.id);
@@ -377,16 +424,27 @@ public class MapScreen extends Screen {
 
 
     //Render chunks
+    private NativeImage tilesetImg;
+
     private void renderAllSections(int px, int pz, int originCx, int originCz, double maxCells) throws IOException {
         int maxCy = currentMaxCy();
-        NativeImage tileset = loadTileset();
+        if (tilesetImg == null) {
+            tilesetImg = loadTileset();
+            prepareAtlas(tilesetImg);
+        }
+        NativeImage tileset = tilesetImg;
         Path dir = sectionDirectory();
 
-        int cyLo = Math.max(0, Math.floorDiv(IsoMapConfig.minSectionedYBlock, 16));
-        int cyHi = Math.min(maxCy, Math.floorDiv(IsoMapConfig.maxSectionedYBlock, 16));
+        final int T = 8;
+
+        int cyLo = Math.max(0, Math.floorDiv(IsoMapConfig.minSectionedYBlock, 16 * T));
+        int cyHi = Math.min(maxCy / T, Math.floorDiv(IsoMapConfig.maxSectionedYBlock, 16 * T));
         if (cyHi < cyLo) return;
 
-        List<Thread> bandThreads = startBandThreads(dir, cyLo, cyHi, px, pz, tileset, originCx, originCz, maxCells);
+        int rpx = Math.floorDiv(px, T);
+        int rpz = Math.floorDiv(pz, T);
+
+        List<Thread> bandThreads = startBandThreads(dir, cyLo, cyHi, rpx, rpz, tileset, originCx, originCz, maxCells);
         joinAll(bandThreads);
     }
 
@@ -456,30 +514,44 @@ public class MapScreen extends Screen {
     }
 
     private void renderBand(Path dir, int cyLo, int cyHi, int px, int pz, NativeImage tileset, int originCx, int originCz, double maxCells) {
-        final long radiusSq = (long) IsoMapConfig.maxRadius * IsoMapConfig.maxRadius;
+        final long radiusRegions = (IsoMapConfig.maxRadius + 7) / 8;
+        final long radiusSq = radiusRegions * radiusRegions;
+        final int batchSize = Math.max(1, IsoMapConfig.spiralCellSize * IsoMapConfig.spiralCellSize);
 
-        int currentRing = 0;
-        boolean ringHadFiles = false;
-        int emptyRings = 0;
+        List<Map.Entry<Long, Long>> cols = new ArrayList<>(columns.entrySet());
+        cols.sort(Comparator.comparingLong(e -> {
+            long dx = (int) (e.getKey() >> 32) - px;
+            long dz = e.getKey().intValue() - pz;
+            return dx * dx + dz * dz;
+        }));
 
-        for (int batch = 0; batch < maxCells && open; batch++) {
+        List<List<SectionFile>> buckets = newBuckets();
+        int inBatch = 0;
 
-            int ring = ringOf(batch);
-            if (ring != currentRing) {
-                emptyRings = ringHadFiles ? 0 : emptyRings + 1;
-                if (emptyRings >= 3) return;
-                currentRing = ring;
-                ringHadFiles = false;
+        for (var e : cols) {
+            if (!open) return;
+            int x = (int) (e.getKey() >> 32);
+            int z = e.getKey().intValue();
+
+            if (IsoMapConfig.maxRadius > 0) {
+                long ddx = x - px, ddz = z - pz;
+                if (ddx * ddx + ddz * ddz > radiusSq) continue;
             }
 
-            List<List<SectionFile>> buckets = newBuckets();
-            boolean any = collectCellFiles(dir, cellOrigin(batch, px, pz), px, pz, cyLo, cyHi, radiusSq, buckets);
+            long bits = e.getValue();
+            for (int cy = cyHi; cy >= cyLo; cy--) {
+                if ((bits & (1L << cy)) == 0) continue;
+                Path p = dir.resolve("r." + x + "." + cy + "." + z + ".fops");
+                buckets.get(((x & 1) | ((z & 1) << 1)) % WORKERS).add(new SectionFile(p, x, z, cy));
+            }
 
-            if (!any) continue;
-            ringHadFiles = true;
-
-            if (!processBuckets(buckets, tileset, originCx, originCz)) return;
+            if (++inBatch >= batchSize) {
+                if (!processBuckets(buckets, tileset, originCx, originCz)) return;
+                buckets = newBuckets();
+                inBatch = 0;
+            }
         }
+        processBuckets(buckets, tileset, originCx, originCz);
     }
 
     private static int ringOf(int batchIndex) {
@@ -509,7 +581,7 @@ public class MapScreen extends Screen {
         return new int[]{px - half + gx * IsoMapConfig.spiralCellSize, pz - half + gz * IsoMapConfig.spiralCellSize};
     }
 
-    private static boolean collectCellFiles(Path dir, int[] origin, int px, int pz, int cyLo, int cyHi, long radiusSq, List<List<SectionFile>> buckets) {
+    private boolean collectCellFiles(Path dir, int[] origin, int px, int pz, int cyLo, int cyHi, long radiusSq, List<List<SectionFile>> buckets) {
         boolean any = false;
 
         for (int dx = 0; dx < IsoMapConfig.spiralCellSize; dx++) {
@@ -522,15 +594,45 @@ public class MapScreen extends Screen {
                     if (ddx * ddx + ddz * ddz > radiusSq) continue;
                 }
 
+                long cols = columns.getOrDefault(colKey(x, z), 0L);
+                if (cols == 0) continue;
                 for (int cy = cyHi; cy >= cyLo; cy--) {
-                    Path p = dir.resolve(x + "_" + z + "_" + cy + ".fops");
-                    if (!Files.exists(p)) continue;
+                    if ((cols & (1L << cy)) == 0) continue;
+                    Path p = dir.resolve("r." + x + "." + cy + "." + z + ".fops");
                     buckets.get((x & 1) | ((z & 1) << 1)).add(new SectionFile(p, x, z, cy));
                     any = true;
                 }
             }
         }
         return any;
+    }
+
+    private static long colKey(int x, int z) {
+        return ((long) x << 32) | (z & 0xFFFFFFFFL);
+    }
+
+    private static Map<Long, Long> indexSections(Path dir) {
+        Map<Long, Long> cols = new HashMap<>();
+        if (!Files.isDirectory(dir)) return cols;
+
+        try (var stream = Files.newDirectoryStream(dir, "r.*.fops")) {
+            for (Path p : stream) {
+                String n = p.getFileName().toString();
+                // r.<x>.<y>.<z>.fops -> ["r", x, y, z]
+                String[] a = n.substring(0, n.length() - 5).split("\\.");
+                if (a.length != 4) continue;
+                try {
+                    int x  = Integer.parseInt(a[1]);
+                    int cy = Integer.parseInt(a[2]);
+                    int z  = Integer.parseInt(a[3]);
+                    if (cy < 0 || cy >= 64) continue;
+                    cols.merge(colKey(x, z), 1L << cy, (o, v) -> o | v);
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        } catch (IOException ignored) {
+        }
+        return cols;
     }
 
     private static List<List<SectionFile>> newBuckets() {
@@ -552,12 +654,9 @@ public class MapScreen extends Screen {
         }
 
         try {
-            batchPool.invokeAll(tasks);
+            for (Callable<Void> t : tasks) batchPool.submit(t);
             return open;
         } catch (RejectedExecutionException e) {
-            return false;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
             return false;
         }
     }
@@ -566,26 +665,34 @@ public class MapScreen extends Screen {
 
     //Process chunk sections
     private void processSector(List<SectionFile> sector, NativeImage tileset, int originCx, int originCz, boolean straight, int direction) {
-        final int w = straight ? 32 : 64;
+
+        final int n = 128;
+        final int w = straight ? 2 * n : 4 * n;
+        final int h = 4 * n;
         final int rot = straight ? (4 - direction) & 3 : (direction + 3) & 3;
 
-        try {
-            for (SectionFile sf : sector) {
-                if (!open) return;
-                if (!waitForRoom()) return;
+        for (SectionFile sf : sector) {
+            if (!open) return;
+            if (!waitForRoom()) return;
+            try {
+                CreateChunkFile.RegionParse[] region = CreateChunkFile.decodeRegion(sf.x(), sf.z(), sf.y());
+                var combined = CreateChunkFile.combineRegion(region);
+                int[][][] blocks = combined.blocks();
+                int[][][] biomes = combined.biomes();
 
-                int[][][] blocks = CreateChunkFile.decodeSection(sf.x(), sf.z(), sf.y());
-                byte[] depth = new byte[w * 64];
-                int[][] sectionImage = buildSectionImage(blocks, tileset, depth, straight, direction);
-                int[] argb = flatten(sectionImage, w);
+                short[] depth = new short[w * h];
+                int[] argb = buildSectionImage(blocks, biomes, tileset, depth, straight, direction,
+                        sf.x() * blocks.length, sf.y() * blocks.length, sf.z() * blocks.length);
 
-                int[] rel = rotatedChunkPos(rot, sf.x() - originCx, sf.z() - originCz);
+                if (argb == null) { room.release(); continue; }
 
-                pendingTiles.add(new TileResult(rel[0], rel[1], sf.y(), w, argb, depth));
+                int[] rel = rotatedChunkPos(rot, sf.x() * 8 - originCx, sf.z() * 8 - originCz, 8);
+                pendingTiles.add(new TileResult(rel[0], rel[1], sf.y() * 8, w, argb, depth));
                 pendingCount.incrementAndGet();
+            } catch (Throwable ex) {
+                room.release();
+                ex.printStackTrace();
             }
-        } catch (Throwable t) {
-            t.printStackTrace();
         }
     }
 
@@ -601,87 +708,223 @@ public class MapScreen extends Screen {
         }
     }
 
-    private static int[] rotatedChunkPos(int rot, int dx, int dz) {
+    private static int[] rotatedChunkPos(int rot, int dx, int dz, int size) {
         return switch (rot) {
-            case 1  -> new int[]{-dz - 1, dx};
-            case 2  -> new int[]{-dx - 1, -dz - 1};
-            case 3  -> new int[]{dz,      -dx - 1};
-            default -> new int[]{dx,      dz};
+            case 1  -> new int[]{-dz - size, dx};
+            case 2  -> new int[]{-dx - size, -dz - size};
+            case 3  -> new int[]{dz,         -dx - size};
+            default -> new int[]{dx,         dz};
         };
     }
 
     //Create NativeImage
-    private int[][] buildSectionImage(int[][][] blocks, NativeImage tileset, byte[] depth, boolean straight, int direction) {
-        final int w = straight ? 32 : 64;
-        int[][] image = new int[w][64];
-        if (blocks == null) return image;
+    private int[] buildSectionImage(int[][][] blocks, int[][][] biomes, NativeImage tileset, short[] depth, boolean straight, int direction, int originX, int originY, int originZ) {
+        if (blocks == null) return null;
+        boolean drawn = false;
+
+        final int N = blocks.length;
+        final int w = straight ? 2 * N : 4 * N;
+        final int h = 4 * N;
+        int[] image = new int[w * h];
 
         final int atlasCellsPerRow = 50;
         final int tileW = 4, tileH = 4;
+        final int[] atlas = this.atlas;
+        final boolean[] opq = this.opq;
+        final int atlasW = this.atlasW, atlasH = this.atlasH;
 
         final int rot = straight ? (4 - direction) & 3 : (direction + 3) & 3;
-        final int steps = straight ? 16 : 31;
-
         final float floor = 0.15f + 0.85f * (IsoMapConfig.brightness / 100);
 
-        for (int sy = 0; sy < 16; sy++) {
+        final int steps = straight ? N : 2 * N - 1;
+
+        for (int sy = 0; sy < N; sy++) {
             for (int step = 0; step < steps; step++) {
-                for (int vx = 15; vx >= 0; vx--) {
+                for (int vx = N - 1; vx >= 0; vx--) {
                     int vz = straight ? step : step - vx;
-                    if (vz < 0 || vz >= 16) continue;
+                    if (vz < 0 || vz >= N) continue;
 
                     int sx, sz;
                     switch (rot) {
-                        case 1  -> { sx = vz;      sz = 15 - vx; }
-                        case 2  -> { sx = 15 - vx; sz = 15 - vz; }
-                        case 3  -> { sx = 15 - vz; sz = vx; }
-                        default -> { sx = vx;      sz = vz; }
+                        case 1  -> { sx = vz;         sz = N - 1 - vx; }
+                        case 2  -> { sx = N - 1 - vx; sz = N - 1 - vz; }
+                        case 3  -> { sx = N - 1 - vz; sz = vx; }
+                        default -> { sx = vx;         sz = vz; }
                     }
 
                     int id = blocks[sx][sy][sz] & 0xFFF;
                     if (id == 0) continue;
 
-                    float shade = floor + (1f - floor) * (blockLight(blocks, sx, sy, sz) / 15f);
+                    if (sy < N - 1 && vz < N - 1 && (straight || vx < N - 1)
+                            && opq[blockAt(blocks, rot, vx, vz, sy + 1)]
+                            && opq[blockAt(blocks, rot, vx, vz + 1, sy)]
+                            && (straight || opq[blockAt(blocks, rot, vx + 1, vz, sy)])) continue;
 
                     int ax = (id % atlasCellsPerRow) * tileW;
                     int ay = (id / atlasCellsPerRow) * tileH;
+                    if (ax + tileW > atlasW || ay + tileH > atlasH) continue;
+
+                    float shade = floor + (1f - floor) * (blockLight(blocks, sx, sy, sz) / 15f);
+
+                    int tint = 0;
+                    byte tt = tintType[id];
+                    if (tt != 0) {
+                        int bid = biomeAt(biomes, N, sx, sy, sz);
+                        Biome[] bm = biomeById;
+                        Biome biome = (bid >= 0 && bid < bm.length) ? bm[bid] : null;
+                        if (biome != null) {
+                            int wx = originX + sx;
+                            int wz = originZ + sz;
+                            int rgb = switch (tt) {
+                                case 1  -> biome.getGrassColor(wx, wz);
+                                case 2  -> biome.getFoliageColor();
+                                case 4  -> biome.getDryFoliageColor();
+                                default -> biome.getWaterColor();
+                            };
+                            tint = 0xFF000000 | rgb;
+                        }
+                    }
+                    final boolean topOnly = grassTop[id];
 
                     int px, py, d;
                     if (straight) {
                         px = 2 * vx;
-                        py = 30 + 2 * vz - 2 * sy;
+                        py = 2 * (N - 1) + 2 * vz - 2 * sy;
                         d  = vz + sy;
                     } else {
-                        px = 30 + 2 * (vx - vz);
-                        py = 30 + vx + vz - 2 * sy;
+                        px = 2 * (N - 1) + 2 * (vx - vz);
+                        py = 2 * (N - 1) + vx + vz - 2 * sy;
                         d  = vx + vz + sy;
                     }
 
                     for (int dx = 0; dx < tileW; dx++) {
                         for (int dy = 0; dy < tileH; dy++) {
                             int tx = px + dx, ty = py + dy;
-                            if (tx < 0 || tx >= w || ty < 0 || ty >= 64) continue;
+                            if (tx < 0 || tx >= w || ty < 0 || ty >= h) continue;
 
-                            int argb = tileset.getPixel(ax + dx, ay + dy);
+                            int argb = atlas[(ay + dy) * atlasW + ax + dx];
                             if ((argb >>> 24) == 0) continue;
+                            if (tint != 0 && (!topOnly || dy < 2)) argb = multiply(argb, tint);
 
-                            image[tx][ty] = over(shaded(argb, shade), image[tx][ty]);
-                            depth[ty * w + tx] = (byte) d;
+                            int i = ty * w + tx;
+                            image[i] = over(shaded(argb, shade), image[i]);
+                            depth[i] = (short) d;
+                            drawn = true;
                         }
                     }
                 }
             }
         }
-        return image;
+        return drawn ? image : null;
     }
 
-    private static int blockLight(int[][][] blocks, int sx, int sy, int sz) {
-        int light = blocks[sx][sy][sz] >>> 12;
-        if (light == 0 && sy < 15) {
-            light = blocks[sx][sy + 1][sz] >>> 12;
+
+    private volatile Biome[] biomeById = new Biome[0];
+
+    private void loadBiomes(ClientLevel level) {
+        try {
+            Path p = FabricLoader.getInstance().getConfigDir().resolve("IsoMap/biome_index.json");
+            InputStream in = Files.exists(p) ? Files.newInputStream(p)
+                    : MapScreen.class.getResourceAsStream("/biomes.json");
+            System.out.println("[IsoMap] biomes.json found=" + (in != null) + " configPath=" + p + " exists=" + Files.exists(p));
+            if (in == null) return;
+
+            JsonObject json;
+            try (InputStreamReader r = new InputStreamReader(in)) {
+                json = JsonParser.parseReader(r).getAsJsonObject();
+            }
+            Registry<Biome> reg = level.registryAccess().lookupOrThrow(Registries.BIOME);
+
+            int max = json.entrySet().stream().mapToInt(e -> e.getValue().getAsInt()).max().orElse(0) + 1;
+            Biome[] arr = new Biome[max];
+            for (var e : json.entrySet()) {
+                arr[e.getValue().getAsInt()] = reg.getValue(Identifier.parse(e.getKey()));
+            }
+            biomeById = arr;
+            System.out.println("[IsoMap] biomes loaded: " + Arrays.stream(arr).filter(Objects::nonNull).count());
+        } catch (Exception ex) {
+            ex.printStackTrace();
         }
+    }
+
+    private void buildTintTable(Map<Integer, String> idToName) {
+        for (var e : idToName.entrySet()) {
+            int id = e.getKey() & 0xFFF;
+            String p = e.getValue().replace("minecraft:", "");
+            byte t = 0;
+
+            if (p.equals("grass_block") || p.equals("short_grass") || p.equals("tall_grass")
+                    || p.equals("fern") || p.equals("large_fern") || p.equals("bush")
+                    || p.equals("sugar_cane") || p.equals("potted_fern")
+                    || p.equals("attached_melon_stem") || p.equals("attached_pumpkin_stem")
+                    || p.equals("melon_stem") || p.equals("pumpkin_stem")) {
+                t = 1;                                   // grass colormap
+            } else if ((p.endsWith("_leaves")
+                    && !p.equals("cherry_leaves") && !p.equals("pale_oak_leaves")
+                    && !p.equals("azalea_leaves") && !p.equals("flowering_azalea_leaves"))
+                    || p.equals("vine") || p.equals("lily_pad")) {
+                t = 2;                                   // foliage colormap
+            } else if (p.equals("water") || p.equals("bubble_column") || p.equals("water_cauldron")) {
+                t = 3;                                   // water color
+            } else if (p.equals("leaf_litter")) {
+                t = 4;                                   // dry foliage colormap
+            }
+
+            tintType[id] = t;
+            grassTop[id] = p.equals("grass_block");
+        }
+    }
+
+    private void loadBlockTints() {
+        Path p = FabricLoader.getInstance().getConfigDir().resolve("IsoMap/block_index.json");
+        System.out.println("[IsoMap] loading block index from " + p + " exists=" + Files.exists(p));
+        if (!Files.exists(p)) return;
+
+        try (InputStream in = Files.newInputStream(p);
+             InputStreamReader reader = new InputStreamReader(in)) {
+            JsonObject json = JsonParser.parseReader(reader).getAsJsonObject();
+            Map<Integer, String> idToName = new HashMap<>();
+            for (var e : json.entrySet()) idToName.put(e.getValue().getAsInt(), e.getKey());
+            buildTintTable(idToName);
+
+            long n = 0;
+            for (byte t : tintType) if (t != 0) n++;
+            System.out.println("[IsoMap] tinted block ids: " + n);
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+    }
+
+
+    private static int blockLight(int[][][] b, int sx, int sy, int sz) {
+        int n = b.length;
+        int light = b[sx][sy][sz] >>> 12;
+        if (sy + 1 < n) light = Math.max(light, b[sx][sy + 1][sz] >>> 12);
+        if (sy > 0)     light = Math.max(light, b[sx][sy - 1][sz] >>> 12);
+        if (sx + 1 < n) light = Math.max(light, b[sx + 1][sy][sz] >>> 12);
+        if (sx > 0)     light = Math.max(light, b[sx - 1][sy][sz] >>> 12);
+        if (sz + 1 < n) light = Math.max(light, b[sx][sy][sz + 1] >>> 12);
+        if (sz > 0)     light = Math.max(light, b[sx][sy][sz - 1] >>> 12);
         return light;
     }
+
+    private final byte[] tintType = new byte[4096];   // 0 none, 1 grass, 2 foliage, 3 water
+    private final boolean[] grassTop = new boolean[4096];
+
+    private static int multiply(int argb, int tint) {
+        int r = (argb >> 16 & 255) * (tint >> 16 & 255) / 255;
+        int g = (argb >> 8  & 255) * (tint >> 8  & 255) / 255;
+        int b = (argb       & 255) * (tint       & 255) / 255;
+        return (argb & 0xFF000000) | r << 16 | g << 8 | b;
+    }
+
+    private static int biomeAt(int[][][] biomes, int N, int sx, int sy, int sz) {
+        if (biomes == null) return -1;
+        int bl = biomes.length;   // 32 if it's per 4x4x4 cell, 128 if per block
+        return biomes[sx * bl / N][sy * bl / N][sz * bl / N];
+    }
+
+
 
     private static int shaded(int argb, float shade) {
         int r = (int) ((argb >> 16 & 255) * shade);
@@ -704,15 +947,6 @@ public class MapScreen extends Screen {
     private static int ch(int s, int sa, int d, int da, int outA) {
         return (s * sa * 255 + d * da * (255 - sa)) / (outA * 255);
     }
-
-    private static int[] flatten(int[][] image, int w) {
-        int[] argb = new int[w * 64];
-        for (int ty = 0; ty < 64; ty++)
-            for (int tx = 0; tx < w; tx++)
-                argb[ty * w + tx] = image[tx][ty];
-        return argb;
-    }
-
 
 
     //Delete Blank Chunks
@@ -841,4 +1075,40 @@ public class MapScreen extends Screen {
         return true;
     }
 
+    private int[] atlas = new int[0];
+    private int atlasW, atlasH;
+    private boolean[] opq = new boolean[4096];
+
+    private void prepareAtlas(NativeImage ts) {
+        atlasW = ts.getWidth();
+        atlasH = ts.getHeight();
+        int[] a = new int[atlasW * atlasH];
+        for (int y = 0; y < atlasH; y++)
+            for (int x = 0; x < atlasW; x++)
+                a[y * atlasW + x] = ts.getPixel(x, y);
+
+        boolean[] o = new boolean[4096];
+        for (int id = 1; id < 4096; id++) {
+            int ax = (id % 50) * 4, ay = (id / 50) * 4;
+            if (ax + 3 >= atlasW || ay + 3 >= atlasH) continue;
+            boolean all = true;
+            for (int dy = 0; dy < 4 && all; dy++)
+                for (int dx = 0; dx < 4; dx++)
+                    if ((a[(ay + dy) * atlasW + ax + dx] >>> 24) != 255) { all = false; break; }
+            o[id] = all;
+        }
+        atlas = a;
+        opq = o;
+    }
+
+    private static int blockAt(int[][][] b, int rot, int vx, int vz, int sy) {
+        int m = b.length - 1;
+        int v = switch (rot) {
+            case 1  -> b[vz][sy][m - vx];
+            case 2  -> b[m - vx][sy][m - vz];
+            case 3  -> b[m - vz][sy][vx];
+            default -> b[vx][sy][vz];
+        };
+        return v & 0xFFF;
+    }
 }

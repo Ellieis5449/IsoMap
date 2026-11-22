@@ -4,6 +4,7 @@ import com.mojang.blaze3d.platform.InputConstants;
 import lgbt.elizabeth.isomap.client.config.IsoMapConfig;
 import lgbt.elizabeth.isomap.client.data.CreateChunkFile;
 import lgbt.elizabeth.isomap.client.data.CreateTileImage;
+import lgbt.elizabeth.isomap.client.data.OrganizeData;
 import lgbt.elizabeth.isomap.client.render.MapScreen;
 import lgbt.elizabeth.isomap.mixin.client.BiomeManagerAccessor;
 import net.fabricmc.api.ClientModInitializer;
@@ -17,6 +18,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.packs.PackType;
@@ -25,6 +27,7 @@ import net.minecraft.server.packs.resources.ResourceManagerReloadListener;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HexFormat;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class IsomapClient implements ClientModInitializer {
@@ -50,6 +53,16 @@ public class IsomapClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+
+        Path configDirectory = FabricLoader.getInstance().getConfigDir();
+        Path blockIndexFile = configDirectory.resolve("IsoMap").resolve("block_index.json");
+        Path biomeIndexFile = configDirectory.resolve("IsoMap").resolve("biome_index.json");
+
+        try {
+            OrganizeData.loadBlockIds(blockIndexFile);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
 
         ResourceLoader.get(PackType.CLIENT_RESOURCES).registerReloadListener(
                 Identifier.fromNamespaceAndPath("isomap", "tileset"),
@@ -84,8 +97,15 @@ public class IsomapClient implements ClientModInitializer {
         ClientPlayConnectionEvents.JOIN.register((_, _, client) -> {
             tickCounter = 0;
 
-            if (client.level != null) {
-                CreateChunkFile.getMaxYSection(client.level);
+            ClientLevel level = client.level;
+            if (level != null) {
+                CreateChunkFile.getMaxYSection(level);
+
+                try {
+                    OrganizeData.loadBiomeIds(biomeIndexFile, level.registryAccess().lookupOrThrow(Registries.BIOME));
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
             }
         });
 
@@ -135,10 +155,10 @@ public class IsomapClient implements ClientModInitializer {
 
     private static void makeDir() throws IOException {
         Path configDirectory = FabricLoader.getInstance().getConfigDir();
-        Path myModFolder = configDirectory.resolve("IsoMap");
+        Path isoMapFolder = configDirectory.resolve("IsoMap");
 
-        if (!Files.exists(myModFolder)) {
-            Files.createDirectories(myModFolder);
+        if (!Files.exists(isoMapFolder)) {
+            Files.createDirectories(isoMapFolder);
         }
     }
 }

@@ -28,21 +28,10 @@ public class CreateTileImage {
     private static final int POT_COLOR = 0xFF7A4B3A;
     private static final int BANNER_STAND_COLOR = 0xFF554328;
 
-    private static int grassTint() {
-        return IsoMapConfig.grassHue & 0xFFFFFF;
-    }
-
     private static int waterAlpha() {
         return IsoMapConfig.waterTint & 0xFF;
     }
 
-    private static final int FOLIAGE_TINT = 0x3C7A22;
-    private static final int BIRCH_TINT = 0x40522A;
-    private static final int SPRUCE_TINT = 0x395939;
-    private static final int MANGROVE_TINT = 0x375125;
-    private static final int DRY_FOLIAGE_TINT = 0x615C17;
-    private static final int LILY_PAD_TINT = 0x104018;
-    private static final int WATER_TINT = 0x3f76e4;
 
     private static final int GLASS_ALPHA = 0x70;
 
@@ -91,17 +80,23 @@ public class CreateTileImage {
     );
 
     public static void createIndex(ResourceManager rm) throws IOException {
-        int blockCount = BuiltInRegistries.BLOCK.size();
-        int rows = (blockCount + COLS - 1) / COLS;
+        Map<String, Integer> ids = OrganizeData.getBlockIds();
+        if (ids.isEmpty()) throw new IllegalStateException("Block ids not loaded; call loadBlockIds first");
+
+        int maxId = ids.values().stream().mapToInt(Integer::intValue).max().orElse(-1);
+        int rows = (maxId + 1 + COLS - 1) / COLS;
         Sheet sheet = new Sheet(COLS, rows);
 
-        for (int id = 0; id < blockCount; id++) {
-            Block block = BuiltInRegistries.BLOCK.byId(id);
+        for (Block block : BuiltInRegistries.BLOCK) {
+            String key = BuiltInRegistries.BLOCK.getKey(block).toString();
+            Integer id = ids.get(key);
+            if (id == null) continue;
+
             sheet.moveTo(id % COLS, id / COLS);
             drawBlock(sheet, rm, block);
 
             if (sheet.isBlank()) {
-                System.out.println("empty tile: " + id + " " + BuiltInRegistries.BLOCK.getKey(block));
+                System.out.println("empty tile: " + id + " " + key);
             }
         }
 
@@ -113,7 +108,6 @@ public class CreateTileImage {
         }
 
         Path tileset = FabricLoader.getInstance().getConfigDir().resolve("IsoMap/Tileset/IsoMap_TileSet.png");
-
         Files.createDirectories(tileset.getParent());
         ImageIO.write(img, "png", tileset.toFile());
     }
@@ -124,7 +118,6 @@ public class CreateTileImage {
         String name = BuiltInRegistries.BLOCK.getKey(block).getPath();
 
         NativeImage tex = loadBlockTexture(rm, getBaseBlock(block));
-        tintImage(tex, tintFor(name));
         boolean drawn = drawShape(s, block, name, tex);
         close(tex);
 
@@ -190,8 +183,6 @@ public class CreateTileImage {
         if (tex == null) tex = loadBlockTexture(rm, getBaseBlock(block));
         if (tex == null) return;
 
-        if (!name.equals("grass_block")) tintImage(tex, tintFor(name));
-
         try {
             if (block instanceof AbstractSkullBlock) {
                 int scale = Math.max(1, tex.getWidth() / 64);
@@ -224,7 +215,6 @@ public class CreateTileImage {
 
     private static void drawGeneric(Sheet s, ResourceManager rm, Block block, String name, NativeImage tex) {
         NativeImage top = loadBlockTopTexture(rm, block);
-        tintImage(top, tintFor(name));
         boolean sparse = isSparse(tex) || (top != null && isSparse(top));
 
         if (name.contains("glass") || name.endsWith("_leaves")) {
@@ -502,38 +492,6 @@ public class CreateTileImage {
         int g = (((argb >> 8) & 0xFF) * (100 - percent)) / 100;
         int b = ((argb & 0xFF) * (100 - percent)) / 100;
         return a | (r << 16) | (g << 8) | b;
-    }
-
-    private static int tintFor(String name) {
-        if (name.endsWith("_leaves")) {
-            if (name.startsWith("birch")) return BIRCH_TINT;
-            if (name.startsWith("spruce")) return SPRUCE_TINT;
-            if (name.startsWith("mangrove")) return MANGROVE_TINT;
-            if (name.startsWith("azalea") || name.startsWith("flowering_azalea")
-                    || name.startsWith("cherry") || name.startsWith("pale_oak")) return 0;
-            return FOLIAGE_TINT;
-        }
-        return switch (name) {
-            case "grass_block", "short_grass", "tall_grass", "fern", "large_fern", "potted_fern", "sugar_cane", "bush" -> grassTint();
-            case "leaf_litter" -> DRY_FOLIAGE_TINT;
-            case "vine" -> FOLIAGE_TINT;
-            case "lily_pad" -> LILY_PAD_TINT;
-            case "water" -> WATER_TINT;
-            default -> 0;
-        };
-    }
-
-    private static void tintImage(NativeImage img, int rgb) {
-        if (img == null || rgb == 0) return;
-        for (int y = 0; y < img.getHeight(); y++) {
-            for (int x = 0; x < img.getWidth(); x++) {
-                int c = img.getPixel(x, y);
-                int r = ((c >> 16) & 0xFF) * ((rgb >> 16) & 0xFF) / 255;
-                int g = ((c >> 8) & 0xFF) * ((rgb >> 8) & 0xFF) / 255;
-                int b = (c & 0xFF) * (rgb & 0xFF) / 255;
-                img.setPixel(x, y, (c & 0xFF000000) | (r << 16) | (g << 8) | b);
-            }
-        }
     }
 
     private static int alphaFor(Block block, String name) {
