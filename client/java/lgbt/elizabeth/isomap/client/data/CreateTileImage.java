@@ -113,7 +113,6 @@ public class CreateTileImage {
     }
 
     //Drawing
-
     private static void drawBlock(Sheet s, ResourceManager rm, Block block) {
         String name = BuiltInRegistries.BLOCK.getKey(block).getPath();
 
@@ -191,11 +190,11 @@ public class CreateTileImage {
                 s.slab(tex);
             } else if (name.equals("bamboo")) {
                 s.fillAverage(tex, 1, 1, 1, 2, PLANT_SHADE);
+            } else if (block instanceof CactusBlock) {
+                s.flatCube(averageColor(tex));
             } else if (isPlant(block)) {
                 s.fillAverage(tex, 1, 2, 2, 2, PLANT_SHADE);
                 s.put(2, 2, 0);
-            } else if (block instanceof CactusBlock) {
-                s.cube(tex);
             } else if (block instanceof KelpBlock) {
                 s.fillAverage(tex, 1, 1, 2, 2, FRONT);
                 s.put(2, 2, 0);
@@ -250,7 +249,6 @@ public class CreateTileImage {
     }
 
     //Tile canvas
-
     private static final class Sheet {
         final int[][] pixels;
         private int originX, originY;
@@ -381,7 +379,6 @@ public class CreateTileImage {
     }
 
     //Textures
-
     private static NativeImage readTexture(ResourceManager rm, String namespace, String path) {
         Optional<Resource> res = rm.getResource(Identifier.fromNamespaceAndPath(namespace, path));
         if (res.isEmpty()) return null;

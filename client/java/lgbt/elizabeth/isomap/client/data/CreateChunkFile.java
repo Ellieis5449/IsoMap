@@ -20,17 +20,16 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.storage.LevelResource;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import org.jspecify.annotations.NonNull;
 
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.zip.GZIPInputStream;
-import java.util.ArrayDeque;
 
 public class CreateChunkFile {
 
@@ -41,6 +40,14 @@ public class CreateChunkFile {
             for (String[] row : plane)
                 Arrays.fill(row, "minecraft:air");
     }
+
+    private static final Map<Block, String> NAME_CACHE = new ConcurrentHashMap<>();
+    private static final Map<Long, Integer> SAVED_HASH = new ConcurrentHashMap<>();
+    private static final Map<Long, Long> SETTLE_AT = new ConcurrentHashMap<>();
+    private static volatile String cacheWorld = "";
+    private static final long SETTLE_MS = 2500;
+    private static final long REFRESH_MS = 300_000;
+    private static final int CACHE_LIMIT = 400_000;
 
 
     //getMaxYSection
@@ -114,7 +121,7 @@ public class CreateChunkFile {
         if (sy < 0 || sy >= sections.length) return null;
 
         LevelChunkSection section = sections[sy];
-        if (section.hasOnlyAir()) return AIR;   // AIR must now be a String[][][] too
+        if (section.hasOnlyAir()) return AIR;
 
         String[][][] blocks = new String[16][16][16];
 
@@ -124,7 +131,7 @@ public class CreateChunkFile {
                     BlockState s = section.getBlockState(x, y, z);
                     if (s.isAir()) continue;
 
-                    blocks[x][y][z] = BuiltInRegistries.BLOCK.getKey(s.getBlock()).toString();
+                    blocks[x][y][z] = NAME_CACHE.computeIfAbsent(s.getBlock(), b -> BuiltInRegistries.BLOCK.getKey(b).toString());
                 }
             }
         }
@@ -163,31 +170,97 @@ public class CreateChunkFile {
 
 
     //Saving Chunks
-    public static void encodeSection(int sx, int sz, int sy, float modVer) throws FileNotFoundException {
-
+    static OrganizeData.SectionWrite prepareSection(int sx, int sz, int sy, float modVer) {
         String[][][] blocks = readChunkBlocks(sx, sz, sy);
+        if (blocks == null) return null;
+
+        long key = OrganizeData.morton(sx, sy, sz);
+        int hash = blocks == AIR ? 1 : Arrays.deepHashCode(blocks);
+        long now = System.currentTimeMillis();
+        Integer prev = SAVED_HASH.get(key);
+        if (prev != null && prev == hash) {
+            Long due = SETTLE_AT.get(key);
+            if (due == null || now < due) return null;
+            SETTLE_AT.put(key, now + REFRESH_MS + ThreadLocalRandom.current().nextLong(REFRESH_MS / 2));
+        } else {
+            SAVED_HASH.put(key, hash);
+            SETTLE_AT.put(key, now + SETTLE_MS);
+        }
+
+        boolean airOnly = blocks == AIR;
+        if (!airOnly && IsoMapConfig.repSolidSecAir && isFullyEnclosed(sx, sz, sy, blocks)) return null;
+
         String[][][] biomes = readChunkBiomes(sx, sz, sy);
+        byte[] light = airOnly ? new byte[4096] : readChunkLight(sx, sz, sy);
+        byte[] data = OrganizeData.serializeSection(blocks, biomes, light, modVer);
+        return new OrganizeData.SectionWrite(sx, sy, sz, data, airOnly);
+    }
 
-        if (blocks == null) return;
+    public static void saveRenderDist(int playerX, int playerZ, float modVer) {
+        Minecraft mc = Minecraft.getInstance();
+        ClientLevel level = mc.level;
+        if (level == null) return;
 
-        if (IsoMapConfig.repSolidSecAir) {
-            if (isFullyEnclosed(sx, sz, sy, blocks)) return;
+        String worldKey = getWorldIdentifier() + "|" + IsomapClient.getSeedString() + "|"
+                + getWorldDimension() + "|" + IsoMapConfig.repSolidSecAir;
+        if (!worldKey.equals(cacheWorld) || SAVED_HASH.size() > CACHE_LIMIT) {
+            SAVED_HASH.clear();
+            SETTLE_AT.clear();
+            cacheWorld = worldKey;
         }
 
-        Path fileDirectory = getPath(sx, sz, sy);
-        if (Files.notExists(fileDirectory)) {
-            OrganizeData.createFops(sx, sy, sz, modVer, fileDirectory);
+        int minY = level.getMinY();
+        int minSy = 0;
+        int maxSy = getMaxYSection(level);
+        if (IsoMapConfig.saveSectionedY) {
+            minSy = Math.max(0, (IsoMapConfig.minSectionedYBlock - minY) >> 4);
+            maxSy = Math.min(maxSy, (IsoMapConfig.maxSectionedYBlock - minY) >> 4);
         }
+        if (maxSy < minSy) return;
 
-        byte[] light = readChunkLight(sx, sz, sy);
-        byte[] sectionData = OrganizeData.serializeSection(blocks, biomes, light, modVer);
-        try {
-            OrganizeData.modifyFopsSection(fileDirectory, sx, sy, sz, sectionData);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+        int rd = mc.options.renderDistance().get();
+        if (rd > 4) rd -= rd / 2;
+
+        int minCx = playerX - rd, maxCx = playerX + rd, minCz = playerZ - rd, maxCz = playerZ + rd;
+
+        List<int[]> regionsXZ = new ArrayList<>();
+        for (int rx = minCx >> 3; rx <= maxCx >> 3; rx++)
+            for (int rz = minCz >> 3; rz <= maxCz >> 3; rz++)
+                regionsXZ.add(new int[]{rx, rz});
+        regionsXZ.sort(Comparator.comparingLong(r -> {
+            long dx = r[0] * 8L + 4 - playerX, dz = r[1] * 8L + 4 - playerZ;
+            return dx * dx + dz * dz;
+        }));
+
+        for (int[] r : regionsXZ) {
+            for (int ry = minSy >> 3; ry <= maxSy >> 3; ry++) {
+                List<OrganizeData.SectionWrite> writes = new ArrayList<>();
+                for (int cx = Math.max(minCx, r[0] << 3); cx <= Math.min(maxCx, (r[0] << 3) + 7); cx++)
+                    for (int cz = Math.max(minCz, r[1] << 3); cz <= Math.min(maxCz, (r[1] << 3) + 7); cz++)
+                        for (int sy = Math.max(minSy, ry << 3); sy <= Math.min(maxSy, (ry << 3) + 7); sy++) {
+                            try {
+                                var w = prepareSection(cx, cz, sy, modVer);
+                                if (w != null) writes.add(w);
+                            } catch (Throwable t) {
+                                System.err.println("prepareSection failed at " + cx + "," + cz + "," + sy);
+                                t.printStackTrace();
+                            }
+                        }
+                if (writes.isEmpty()) continue;
+
+                var first = writes.getFirst();
+                Path file = getPath(first.sx(), first.sz(), first.sy());
+                try {
+                    if (Files.notExists(file)) {
+                        if (writes.stream().allMatch(OrganizeData.SectionWrite::onlyIfPresent)) continue;
+                        OrganizeData.createFops(first.sx(), first.sy(), first.sz(), modVer, file);
+                    }
+                    OrganizeData.modifyFopsSections(file, writes);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
         }
-
-
     }
 
     private static @NonNull Path getPath(int sx, int sz, int sy) {
@@ -206,36 +279,10 @@ public class CreateChunkFile {
         return worldDirectory.resolve(fileName);
     }
 
-    public static void saveRenderDist(int playerX, int playerZ, float modVer) {
-        int maxCy = 0;
-        ClientLevel level = Minecraft.getInstance().level;
-        if (level != null) {
-            maxCy = getMaxYSection(level);
-        }
-
-        int renderDistance = Minecraft.getInstance().options.renderDistance().get();
-
-        if (renderDistance > 4) {
-            renderDistance -= (renderDistance/2);
-        }
-
-        for (int sy = 0; sy <= maxCy; sy++) {
-            for (int sx = playerX + renderDistance; sx >= playerX - renderDistance; sx--) {
-                for (int sz = playerZ + renderDistance; sz >= playerZ - renderDistance; sz--) {
-                    try {
-                        encodeSection(sx, sz, sy, modVer);
-                    } catch (Throwable t) {
-                        System.err.println("encodeSection failed at " + sx + "," + sz + "," + sy);
-                        t.printStackTrace();
-                    }
-                }
-            }
-        }
-    }
-
 
 
     public record RegionParse(long key, int[] blockData, int[] biomeData, byte[] lightData) {}
+
     //Loading Chunks
     public static RegionParse[] decodeRegion(int rx, int rz, int ry) throws IOException {
 
@@ -293,7 +340,7 @@ public class CreateChunkFile {
 
             int[] blockPalette = new int[n];
             for (int p = 0; p < n; p++) {
-                blockPalette[p] = fb.getInt(offset + 2 + p * 6);   // the id; the short after it is just p
+                blockPalette[p] = fb.getInt(offset + 2 + p * 6);
             }
 
             int biomePaletteStart = offset + 2 + n * 6 + 1;
@@ -382,9 +429,9 @@ public class CreateChunkFile {
     public record CombinedRegion(int[][][] blocks, int[][][] biomes) {}
 
     public static int compact(int v) {
-        v &= 0b001001001;                    // bits 0, 3, 6
-        v = (v | (v >> 2)) & 0b1000011;      // keep bits 0, 1, 6
-        v = (v | (v >> 4)) & 0b0000111;      // bit 6 -> bit 2
+        v &= 0b001001001;
+        v = (v | (v >> 2)) & 0b1000011;
+        v = (v | (v >> 4)) & 0b0000111;
         return v;
     }
 

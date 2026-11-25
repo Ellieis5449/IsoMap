@@ -4,8 +4,6 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonParseException;
 import com.google.gson.reflect.TypeToken;
-import lgbt.elizabeth.isomap.client.IsomapClient;
-import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
@@ -19,9 +17,6 @@ import java.util.*;
 import java.util.zip.GZIPOutputStream;
 import java.lang.reflect.Type;
 
-import static lgbt.elizabeth.isomap.client.data.CreateChunkFile.getWorldDimension;
-import static lgbt.elizabeth.isomap.client.data.CreateChunkFile.getWorldIdentifier;
-
 public class OrganizeData {
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -29,12 +24,11 @@ public class OrganizeData {
 
     public static Map<String, Integer> biomeIds;
 
-
-
     public static byte[] serializeSection(String[][][] blocks, String[][][] biomes, byte[] light, float modVer) {
 
         int[] blockList = new int[4096];
         List<String> unique = new ArrayList<>();
+        Map<String, Integer> blockIdx = new HashMap<>();
 
         int i = 0;
         for (int x = 0; x < 16; x++) {
@@ -42,10 +36,11 @@ public class OrganizeData {
                 for (int z = 0; z < 16; z++) {
                     String s = blocks[x][y][z];
 
-                    int index = unique.indexOf(s);
-                    if (index == -1) {
+                    Integer index = blockIdx.get(s);
+                    if (index == null) {
+                        index = unique.size();
                         unique.add(s);
-                        index = unique.size() - 1;
+                        blockIdx.put(s, index);
                     }
                     blockList[i++] = index;
                 }
@@ -54,6 +49,7 @@ public class OrganizeData {
 
         int[] biomeList = new int[64];
         List<String> uniqueBiomes = new ArrayList<>();
+        Map<String, Integer> biomeIdx = new HashMap<>();
 
         int bi = 0;
         for (int x = 0; x < 4; x++) {
@@ -61,17 +57,18 @@ public class OrganizeData {
                 for (int z = 0; z < 4; z++) {
                     String s = biomes[x][y][z];
 
-                    int index = uniqueBiomes.indexOf(s);
-                    if (index == -1) {
+                    Integer index = biomeIdx.get(s);
+                    if (index == null) {
+                        index = uniqueBiomes.size();
                         uniqueBiomes.add(s);
-                        index = uniqueBiomes.size() - 1;
+                        biomeIdx.put(s, index);
                     }
                     biomeList[bi++] = index;
                 }
             }
         }
 
-        // ----body----
+        //Body
         int maxValue = unique.size() - 1;
         int d = 1;
         while (d < 4 && (maxValue >>> (8 * d)) != 0) d++;
@@ -109,9 +106,7 @@ public class OrganizeData {
             throw new UncheckedIOException(e);
         }
 
-
-
-        // ----header----
+        //Header
         ByteBuffer blockPalette = ByteBuffer.allocate(unique.size() * 6);
         for (int n = 0; n < unique.size(); n++) {
             blockPalette.putInt(idOf(unique.get(n)));
@@ -128,7 +123,7 @@ public class OrganizeData {
 
         byte[] ver = ("A" + modVer).getBytes(StandardCharsets.UTF_8);
 
-        //----assemble----
+        //Assemble
         ByteBuffer out = ByteBuffer.allocate(
                 2 + blockPalette.capacity() + 1 + biomePalette.capacity() + 4 + 1 + ver.length + body.length);
 
@@ -144,10 +139,9 @@ public class OrganizeData {
         return out.array();
     }
 
-
     public static void createFops(int sx, int sy, int sz, float modVer, Path fileDirectory) {
 
-        //header
+        //Header
 
         byte[] ver = ("A" + modVer).getBytes(StandardCharsets.UTF_8);
 
@@ -183,114 +177,59 @@ public class OrganizeData {
             Files.createDirectories(fileDirectory.getParent());
             Files.write(fileDirectory, header, StandardOpenOption.CREATE_NEW);
         } catch (FileAlreadyExistsException e) {
-            //
+            //empty
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
 
     }
 
+    public record SectionWrite(int sx, int sy, int sz, byte[] data, boolean onlyIfPresent) {}
 
-    public static synchronized void modifyFopsSection(Path fileDirectory, int sx, int sy, int sz, byte[] sectionData) throws IOException {
-        int slot = (int) (morton(sx, sy, sz) & 511);
-        int pos = 4 + slot * 6;
+    private static final int HEADER = 4;
 
-        byte[] fops = readFile(fileDirectory);
-
-        ByteBuffer fb = ByteBuffer.wrap(fops);
-
-        int offset = fb.getInt(pos);
-        int length = fb.getShort(pos + 4) & 0xFFFF;
-
-
-        byte[] newFops;
-        int newLength = sectionData.length;
-
-        if (offset == -1) {
-            //append it to end
-            int newOffset = fops.length;
-
-            newFops = Arrays.copyOf(fops, fops.length + newLength);
-            System.arraycopy(sectionData, 0, newFops, newOffset, newLength);
-
-            fb = ByteBuffer.wrap(newFops);
-            fb.putInt(pos, newOffset);
-            fb.putShort(pos + 4, (short) newLength);
-        }
-        else if (length >= newLength) {
-            //clear, put in, move up
-            int shrink = length - newLength;
-            int oldEnd = offset + length;
-
-            newFops = Arrays.copyOf(fops, fops.length);
-
-            Arrays.fill(newFops, offset, oldEnd, (byte) 0);
-            System.arraycopy(sectionData, 0, newFops, offset, newLength);
-
-            if (shrink > 0) {
-                System.arraycopy(newFops, oldEnd, newFops, offset + newLength, newFops.length - oldEnd);
-                newFops = Arrays.copyOf(newFops, newFops.length - shrink);
-
-                fb = ByteBuffer.wrap(newFops);
-                for (int s = 0; s < 512; s++) {
-                    int p = 4 + s * 6;
-                    int o = fb.getInt(p);
-
-                    if (o != -1 && o >= oldEnd) {
-                        fb.putInt(p, o - shrink);
-                    }
-                }
-            }
-            else {
-                fb = ByteBuffer.wrap(newFops);
-            }
-
-            fb.putShort(pos + 4, (short) newLength);
-        }
-        else {
-            //clear, move everything up, append it to end
-            int oldEnd = offset + length;
-            int newOffset = fops.length - length;
-
-            newFops = new byte[fops.length - length + newLength];
-
-            System.arraycopy(fops, 0, newFops, 0, offset);
-            System.arraycopy(fops, oldEnd, newFops, offset, fops.length - oldEnd);
-
-            System.arraycopy(sectionData, 0, newFops, newOffset, newLength);
-
-            fb = ByteBuffer.wrap(newFops);
-            for (int s = 0; s < 512; s++) {
-                int p = 4 + s * 6;
-                int o = fb.getInt(p);
-
-                if (o != -1 && o >= oldEnd) {
-                    fb.putInt(p, o - length);
-                }
-            }
-
-            fb.putInt(pos, newOffset);
-            fb.putShort(pos + 4, (short) newLength);
+    public static synchronized void modifyFopsSections(Path file, List<SectionWrite> writes) throws IOException {
+        byte[] old = Files.readAllBytes(file);
+        ByteBuffer ob = ByteBuffer.wrap(old);
+        byte[][] entries = new byte[512][];
+        for (int s = 0; s < 512; s++) {
+            int p = HEADER + s * 6;
+            int off = ob.getInt(p);
+            if (off == -1) continue;
+            int len = ob.getShort(p + 4) & 0xFFFF;
+            entries[s] = Arrays.copyOfRange(old, off, off + len);
         }
 
+        boolean changed = false;
+        for (SectionWrite w : writes) {
+            int slot = (int) (morton(w.sx(), w.sy(), w.sz()) & 511);
+            if (entries[slot] == null && w.onlyIfPresent()) continue;
+            if (entries[slot] != null && Arrays.equals(entries[slot], w.data())) continue;
+            entries[slot] = w.data();
+            changed = true;
+        }
+        if (!changed) return;
+
+        int total = HEADER + 512 * 6;
+        for (byte[] e : entries) if (e != null) total += e.length;
+
+        ByteBuffer out = ByteBuffer.allocate(total);
+        out.put(old, 0, HEADER);
+        int pos = HEADER + 512 * 6;
+        for (byte[] e : entries) {
+            if (e == null) { out.putInt(-1); out.putShort((short) -1); }
+            else { out.putInt(pos); out.putShort((short) e.length); pos += e.length; }
+        }
+        for (byte[] e : entries) if (e != null) out.put(e);
+
+        Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
+        Files.write(tmp, out.array());
         try {
-            Files.createDirectories(fileDirectory.getParent());
-            Files.write(fileDirectory, newFops, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
-            throw new UncheckedIOException(e);
+            Files.write(file, out.array());
+            Files.deleteIfExists(tmp);
         }
-
-    }
-
-
-
-
-
-
-
-
-    public static byte[] readFile(Path filePath) throws IOException {
-        return Files.readAllBytes(filePath);
     }
     static long morton(int x, int y, int z) {
         x += 1 << 20;
@@ -316,13 +255,9 @@ public class OrganizeData {
     }
 
     private static final Type INDEX_TYPE = new TypeToken<LinkedHashMap<String, Integer>>() {}.getType();
-
     public static Map<String, Integer> getBlockIds() {
         return blockIds;
     }
-
-
-
 
     public static void loadBlockIds(Path file) throws IOException {
         List<String> names = new ArrayList<>();
@@ -344,7 +279,6 @@ public class OrganizeData {
             try (Reader r = Files.newBufferedReader(file)) {
                 Map<String, Integer> existing = GSON.fromJson(r, INDEX_TYPE);
                 if (existing == null) {
-                    // Existing but empty file: likely an interrupted write. Never renumber from 0.
                     throw new IOException("ID file exists but is empty, refusing to renumber: " + file);
                 }
                 index.putAll(existing);

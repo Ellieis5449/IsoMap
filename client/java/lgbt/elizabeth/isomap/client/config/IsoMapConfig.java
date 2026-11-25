@@ -11,12 +11,6 @@ import java.util.Properties;
 
 public final class IsoMapConfig {
 
-    //Square size of the spiral cells, goes from floor to ceiling or in the sectioned Y and split with the ySplit variable
-    public static int spiralCellSize = 10;
-
-    //Amount of divisions the spiral is, can help with draw speeds with tall structures.
-    public static int ySplit = 2;
-
     //Maximum Draw Radius
     public static int maxRadius = 4096; //When 0 unlimited
 
@@ -39,18 +33,15 @@ public final class IsoMapConfig {
     //Chunk Save Delay
     public static int saveDelay = 5;
 
-    //Workers Per Cell
+    //Render threads
     public static int workersPerCell = 4;
 
     //Water Tint
     public static int waterTint = 0xA0;
 
-    //Grass Hue
-    public static int grassHue = 0x5A753A;
-
     private static final Path FILE = FabricLoader.getInstance().getConfigDir().resolve("isomap.properties");
 
-    //Parsing helpers: each key is parsed on its own so one bad value can't abort the rest
+    //Parsing helpers
     private static int intOf(Properties p, String key, int def) {
         String s = p.getProperty(key);
         if (s == null) return def;
@@ -78,8 +69,8 @@ public final class IsoMapConfig {
         return s == null ? def : Boolean.parseBoolean(s.trim());
     }
 
-    private static int hexOf(Properties p, String key, int def) {
-        String s = p.getProperty(key);
+    private static int hexOf(Properties p, int def) {
+        String s = p.getProperty("waterTint");
         if (s == null) return def;
         s = s.trim();
         if (s.startsWith("#")) s = s.substring(1);
@@ -87,7 +78,7 @@ public final class IsoMapConfig {
         try {
             return Integer.parseInt(s, 16) & 0xFFFFFF;
         } catch (NumberFormatException e) {
-            System.err.println("[IsoMap] bad hex for " + key + ": '" + s + "'");
+            System.err.println("[IsoMap] bad hex for " + "waterTint" + ": '" + s + "'");
             return def;
         }
     }
@@ -103,8 +94,6 @@ public final class IsoMapConfig {
             return;
         }
 
-        spiralCellSize = intOf(p, "spiralCellSize", spiralCellSize);
-        ySplit = intOf(p, "ySplit", ySplit);
         maxRadius = intOf(p, "maxRadius", maxRadius);
         repSolidSecAir = boolOf(p, "repSolidSecAir", repSolidSecAir);
         minSectionedYBlock = intOf(p, "minSectionedYBlock", minSectionedYBlock);
@@ -114,17 +103,12 @@ public final class IsoMapConfig {
         brightness = floatOf(p, brightness);
         saveDelay = intOf(p, "saveDelay", saveDelay);
         workersPerCell = intOf(p, "workersPerCell", workersPerCell);
-        waterTint = hexOf(p, "waterTint", waterTint);
-        grassHue = hexOf(p, "grassHue", grassHue);
-
-        System.out.println("[IsoMap] loaded grassHue = " + String.format("%06X", grassHue));
+        waterTint = hexOf(p, waterTint);
     }
 
     //Save config settings
     public static void save() {
         Properties p = new Properties();
-        p.setProperty("spiralCellSize", String.valueOf(spiralCellSize));
-        p.setProperty("ySplit", String.valueOf(ySplit));
         p.setProperty("maxRadius", String.valueOf(maxRadius));
         p.setProperty("repSolidSecAir", String.valueOf(repSolidSecAir));
         p.setProperty("minSectionedYBlock", String.valueOf(minSectionedYBlock));
@@ -135,7 +119,6 @@ public final class IsoMapConfig {
         p.setProperty("saveDelay", String.valueOf(saveDelay));
         p.setProperty("workersPerCell", String.valueOf(workersPerCell));
         p.setProperty("waterTint", String.format("%02X", waterTint));
-        p.setProperty("grassHue", String.format("%06X", grassHue));
         try (OutputStream out = Files.newOutputStream(FILE)) {
             p.store(out, "IsoMap settings");
         } catch (IOException e) {
