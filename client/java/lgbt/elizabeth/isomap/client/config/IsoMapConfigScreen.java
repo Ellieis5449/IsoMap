@@ -5,6 +5,7 @@ import lgbt.elizabeth.isomap.client.IsomapClient;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.AbstractSliderButton;
+import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.Checkbox;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.Tooltip;
@@ -33,6 +34,14 @@ public class IsoMapConfigScreen extends Screen {
 
     private final Screen parent;
 
+    private int pendingMaxRadius = IsoMapConfig.maxRadius;
+    private int pendingMinY = IsoMapConfig.minSectionedYBlock;
+    private int pendingMaxY = IsoMapConfig.maxSectionedYBlock;
+    private int pendingDirection = IsoMapConfig.direction;
+    private float pendingBrightness = IsoMapConfig.brightness;
+    private int pendingWorkers = IsoMapConfig.workersPerCell;
+    private int pendingWaterTint = IsoMapConfig.waterTint;
+
     //Background
     private static Identifier bgId;
     private static int bgW, bgH;
@@ -56,9 +65,9 @@ public class IsoMapConfigScreen extends Screen {
     private static void loadBackground() {
         if (bgId != null) return;
 
-        int ranNum = (int) (random() * 8);
+        int ranNum = (int) (random() * 12);
         String ImgName = "config_background_" + ranNum;
-        String backgroundPath = "/textures/backgrounds/" + ImgName + ".png";
+        String backgroundPath = "/textures/backgrounds/Alpha1.1/" + ImgName + ".png";
 
         try (InputStream in = IsoMapConfigScreen.class.getResourceAsStream(backgroundPath)) {
             if (in == null) return;
@@ -95,8 +104,11 @@ public class IsoMapConfigScreen extends Screen {
         mainX = margin;
         expX = margin + colW + margin;
 
-        int w = Math.max(90, (int) (colW * 0.45));
+        int baseW = Math.max(90, (int) (colW * 0.45));
         int h = Math.max(20, (int) (this.height * 0.05));
+
+        int mainW = Math.max(baseW, checkboxWidth("Save outside Y range as air"));
+        int expW = Math.max(baseW, checkboxWidth("Skip solid sections when rendering"));
 
         headerY = margin + iconSize + 12;
         int firstRowY = headerY + this.font.lineHeight + 10;
@@ -106,52 +118,51 @@ public class IsoMapConfigScreen extends Screen {
         int step = Math.max(h + 2, Math.min(h * 2, available / rows));
 
         //MAIN SETTINGS
-        addIntBox(mainX, firstRowY, w, h, "Max Radius", "Max Radius", 10,
-                IsoMapConfig.maxRadius, 0, v -> IsoMapConfig.maxRadius = v, null);
-        addIntBox(mainX, firstRowY + step, w, h, "Maximum Y", "Max Y", 5,
-                IsoMapConfig.maxSectionedYBlock, 0,
-                v -> IsoMapConfig.maxSectionedYBlock = Math.max(IsoMapConfig.minSectionedYBlock + 1, v), null);
-        addIntBox(mainX, firstRowY + step * 2, w, h, "Minimum Y", "Min Y", 5,
-                IsoMapConfig.minSectionedYBlock, 0, v -> IsoMapConfig.minSectionedYBlock = v, null);
-        addCheckbox(mainX, firstRowY + step * 3, "Save outside Y range as air",
+        addIntBox(mainX, firstRowY, mainW, h, "Max Radius", "Max Radius", 10,
+                pendingMaxRadius, 0, v -> pendingMaxRadius = v, null);
+
+        addIntBox(mainX, firstRowY + step, mainW, h, "Maximum Y", "Max Y", 6,
+                pendingMaxY, Integer.MIN_VALUE, v -> pendingMaxY = v, null);
+
+        addIntBox(mainX, firstRowY + step * 2, mainW, h, "Minimum Y", "Min Y", 6,
+                pendingMinY, Integer.MIN_VALUE, v -> pendingMinY = v, null);
+
+        addCheckbox(mainX, firstRowY + step * 3, mainW, "Save outside Y range as air",
                 IsoMapConfig.saveSectionedY, v -> IsoMapConfig.saveSectionedY = v,
                 "Saves parts outside the sectioned Y as air");
-        this.addRenderableWidget(directionSlider(mainX, firstRowY + step * 4, w, h));
-        this.addRenderableWidget(brightnessSlider(mainX, firstRowY + step * 5, w, h));
-        addIntBox(mainX, firstRowY + step * 6, w, h, "Chunk Save Delay", "Seconds", 5,
+
+        this.addRenderableWidget(directionSlider(mainX, firstRowY + step * 4, mainW, h));
+
+        this.addRenderableWidget(brightnessSlider(mainX, firstRowY + step * 5, mainW, h));
+
+        addIntBox(mainX, firstRowY + step * 6, mainW, h, "Chunk Save Delay", "Seconds", 5,
                 IsoMapConfig.saveDelay, 0, v -> IsoMapConfig.saveDelay = v, null);
 
         //EXPERIMENTAL
-        addIntBox(expX, firstRowY, w, h, "Spiral Cell Size", "Spiral Cell Size", 3,
-                IsoMapConfig.spiralCellSize, 1, v -> IsoMapConfig.spiralCellSize = v,
-                "Square size of the spiral cells, goes from floor to ceiling or in the sectioned Y and split with the Y split input");
-        addIntBox(expX, firstRowY + step, w, h, "Y Split", "Y Split", 1,
-                IsoMapConfig.ySplit, 1, v -> IsoMapConfig.ySplit = v,
-                "Amount of divisions the spiral is, can help with draw time with tall structures.");
-        addIntBox(expX, firstRowY + step * 2, w, h, "Workers Per Cell", "Worker Count", 1,
-                IsoMapConfig.workersPerCell, 1, v -> IsoMapConfig.workersPerCell = v,
-                "Amount of worker threads per cell in the spiral.");
-        addHexBox(expX, firstRowY + step * 3, w, h, "Water Transparency", "Alpha (hex 00-FF)",
-                2, IsoMapConfig.waterTint, v -> IsoMapConfig.waterTint = v,
-                "Transparency of water, as a 2-digit hex alpha value (00-FF).");
-        addHexBox(expX, firstRowY + step * 4, w, h, "Grass Hue", "Grass Hue",
-                6, IsoMapConfig.grassHue, v -> IsoMapConfig.grassHue = v, "Hue of grass (hex RRGGBB).");
-        addCheckbox(expX, firstRowY + step * 5, "Skip solid sections when rendering",
+        addIntBox(expX, firstRowY, expW, h, "Render Threads", "Thread Count", 2,
+                pendingWorkers, 1, v -> pendingWorkers = v,
+                "Number of threads used to render map regions.");
+
+        this.addRenderableWidget(waterSlider(expX, firstRowY + step, expW, h));
+        addCheckbox(expX, firstRowY + step * 2, expW, "Skip solid sections when rendering",
                 IsoMapConfig.repSolidSecAir, v -> IsoMapConfig.repSolidSecAir = v,
                 "Replaces all solid sections not touching air when rendering with air.");
     }
 
+    private int checkboxWidth(String text) {
+        return this.font.lineHeight + 8 + 4 + this.font.width(text) + 4;
+    }
+
 
     //Widget Helpers
-    private void addIntBox(int x, int y, int w, int h, String label, String hint,
-                           int maxLen, int value, int min, IntConsumer setter, String tooltip) {
+    private void addIntBox(int x, int y, int w, int h, String label, String hint, int maxLen, int value, int min, IntConsumer setter, String tooltip) {
         EditBox box = new EditBox(this.font, x, y, w, h, Component.literal(label));
         box.setMaxLength(maxLen);
         box.setValue(String.valueOf(value));
         box.setHint(Component.literal(hint));
         if (tooltip != null) box.setTooltip(Tooltip.create(Component.literal(tooltip)));
         box.setResponder(text -> {
-            if (text.matches("\\d+")) {
+            if (text.matches("-?\\d+")) {
                 try {
                     setter.accept(Math.max(min, Integer.parseInt(text)));
                 } catch (NumberFormatException ignored) {}
@@ -161,38 +172,22 @@ public class IsoMapConfigScreen extends Screen {
         this.addRenderableWidget(box);
     }
 
-    private void addHexBox(int x, int y, int w, int h, String label, String hint,
-                           int digits, int value, IntConsumer setter, String tooltip) {
-        EditBox box = new EditBox(this.font, x, y, w, h, Component.literal(label));
-        box.setMaxLength(digits);
-        box.setValue(String.format("%0" + digits + "X", value));
-        box.setHint(Component.literal(hint));
-        if (tooltip != null) box.setTooltip(Tooltip.create(Component.literal(tooltip)));
-        box.setResponder(text -> {
-            boolean valid = text.matches("[0-9a-fA-F]{" + digits + "}");
-            if (valid) setter.accept(Integer.parseInt(text, 16));
-            box.setTextColor(valid ? 0xFFE0E0E0 : 0xFFFF5555);
-        });
-        addLabel(label, x, y, w, h);
-        this.addRenderableWidget(box);
-    }
-
-    private void addCheckbox(int x, int y, String text, boolean value,
-                             Consumer<Boolean> setter, String tooltip) {
+    private void addCheckbox(int x, int y, int w, String text, boolean value, Consumer<Boolean> setter, String tooltip) {
         Checkbox box = Checkbox.builder(Component.literal(text), this.font)
                 .pos(x, y)
                 .selected(value)
                 .onValueChange((_, v) -> setter.accept(v))
                 .build();
+        box.setWidth(w);
         box.setTooltip(Tooltip.create(Component.literal(tooltip)));
-        plates.add(new int[]{x - 2, y - 2, x + box.getWidth() + 2, y + box.getHeight() + 2});
+        plates.add(new int[]{x, y, x + w, y + box.getHeight()});
         this.addRenderableWidget(box);
     }
 
     private AbstractSliderButton directionSlider(int x, int y, int w, int h) {
         return new AbstractSliderButton(x, y, w, h,
-                Component.literal("Direction: " + DIRS[IsoMapConfig.direction]),
-                IsoMapConfig.direction / 7.0) {
+                Component.literal("Direction: " + DIRS[pendingDirection]),
+                pendingDirection / 7.0) {
             @Override
             protected void updateMessage() {
                 int i = (int) Math.round(this.value * 7);
@@ -204,7 +199,7 @@ public class IsoMapConfigScreen extends Screen {
             protected void applyValue() {
                 int i = (int) Math.round(this.value * 7);
                 this.value = i / 7.0;
-                IsoMapConfig.direction = i;
+                pendingDirection = i;
                 updateMessage();
             }
         };
@@ -212,8 +207,8 @@ public class IsoMapConfigScreen extends Screen {
 
     private AbstractSliderButton brightnessSlider(int x, int y, int w, int h) {
         return new AbstractSliderButton(x, y, w, h,
-                Component.literal("Brightness: " + IsoMapConfig.brightness + "%"),
-                IsoMapConfig.brightness / 100.0) {
+                Component.literal("Brightness: " + (int) pendingBrightness + "%"),
+                pendingBrightness / 100.0) {
             @Override
             protected void updateMessage() {
                 setMessage(Component.literal("Brightness: " + (int) Math.round(this.value * 100) + "%"));
@@ -221,24 +216,120 @@ public class IsoMapConfigScreen extends Screen {
 
             @Override
             protected void applyValue() {
-                IsoMapConfig.brightness = (int) Math.round(this.value * 100);
+                pendingBrightness = (int) Math.round(this.value * 100);
             }
         };
     }
 
-    private void drawOutlined(GuiGraphicsExtractor graphics, String text, int x, int y) {
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
-                if (dx != 0 || dy != 0) {
-                    graphics.text(this.font, text, x + dx, y + dy, 0xFF000000, false);
-                }
+    private AbstractSliderButton waterSlider(int x, int y, int w, int h) {
+        double start = 1.0 - pendingWaterTint / 255.0;
+        AbstractSliderButton s = new AbstractSliderButton(x, y, w, h,
+                Component.literal("Water Transparency: " + (int) Math.round(start * 100) + "%"),
+                start) {
+            @Override
+            protected void updateMessage() {
+                setMessage(Component.literal("Water Transparency: " + (int) Math.round(this.value * 100) + "%"));
             }
-        }
-        graphics.text(this.font, text, x, y, 0xFFFFFFFF, true);
+
+            @Override
+            protected void applyValue() {
+                int pct = (int) Math.round(this.value * 100);
+                this.value = pct / 100.0;
+                pendingWaterTint = (int) Math.round((100 - pct) * 255 / 100.0);
+                updateMessage();
+            }
+        };
+        s.setTooltip(Tooltip.create(Component.literal("How see-through water is. 0% is solid, 100% is invisible.")));
+        return s;
     }
 
     private void addLabel(String text, int widgetX, int widgetY, int widgetW, int widgetH) {
         labels.add(new Label(text, widgetX + widgetW + 6, widgetY + (widgetH - this.font.lineHeight) / 2));
+    }
+
+
+    //Gay Colors :3
+    private static final int RAINBOW_STEPS = 40;
+    private static final float RAINBOW_SAT = 0.85f;
+    private static final float RAINBOW_BRI = 0.60f;
+    private static final int TEXT_ALPHA = 0xA0;
+    private static final long PERIOD_MS = 6000;
+
+    private static float phase() {
+        long step = (System.currentTimeMillis() % PERIOD_MS) * RAINBOW_STEPS / PERIOD_MS;
+        return step / (float) RAINBOW_STEPS;
+    }
+
+    private static int pixelRainbow(float hue) {
+        hue -= (float) Math.floor(hue);
+        float q = (float) Math.floor(hue * RAINBOW_STEPS) / RAINBOW_STEPS;
+        return (IsoMapConfigScreen.TEXT_ALPHA << 24) | (java.awt.Color.HSBtoRGB(q, RAINBOW_SAT, RAINBOW_BRI) & 0xFFFFFF);
+    }
+
+    private static int outlineColor(int screenX, float shift) {
+        return pixelRainbow((screenX % 96) / 96f + shift);
+    }
+
+    private void drawRainbowGlow(GuiGraphicsExtractor g, int x, int y, int w, int h) {
+        float shift = phase();
+        int x0 = x - 1, y0 = y - 1, x1 = x + w + 1, y1 = y + h + 1;
+
+        for (int px = x0; px < x1; px++) {
+            int c = outlineColor(px, shift);
+            g.fill(px, y0, px + 1, y0 + 1, c);
+            g.fill(px, y1 - 1, px + 1, y1, c);
+        }
+        int cl = outlineColor(x0, shift), cr = outlineColor(x1 - 1, shift);
+        g.fill(x0, y0 + 1, x0 + 1, y1 - 1, cl);
+        g.fill(x1 - 1, y0 + 1, x1, y1 - 1, cr);
+    }
+
+    private void drawOutlined(GuiGraphicsExtractor graphics, String text, int x, int y) {
+        drawOutlined(graphics, text, x, y, 0xFFFFFFFF);
+    }
+
+    private void drawOutlined(GuiGraphicsExtractor graphics, String text, int x, int y, int textColor) {
+        float shift = phase();
+
+        for (int i = 0; i < text.length(); i++) {
+            String ch = text.substring(i, i + 1);
+            int cx = x + this.font.width(text.substring(0, i));
+            int color = pixelRainbow((cx % 96) / 96f + shift);
+
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    if (dx != 0 || dy != 0) {
+                        graphics.text(this.font, ch, cx + dx, y + dy, color, false);
+                    }
+                }
+            }
+        }
+        graphics.text(this.font, text, x, y, textColor, true);
+    }
+
+    private void drawWidgetTexts(GuiGraphicsExtractor g) {
+        int lh = this.font.lineHeight;
+        for (var c : this.children()) {
+            switch (c) {
+                case EditBox box -> {
+                    if (box.isFocused() || box.getValue().isEmpty()) continue;
+                    drawOutlined(g, box.getValue(), box.getX() + 4, box.getY() + (box.getHeight() - lh) / 2, 0xFFE0E0E0);
+                }
+                case Checkbox cb -> {
+                    int boxSize = lh + 8;
+
+                    drawOutlined(g, cb.getMessage().getString(), cb.getX() + boxSize + 4,
+                            cb.getY() + (cb.getHeight() - lh) / 2, 0xFFFFFFFF);
+                }
+                case AbstractSliderButton sl -> {
+                    String s = sl.getMessage().getString();
+                    drawOutlined(g, s, sl.getX() + (sl.getWidth() - this.font.width(s)) / 2,
+                            sl.getY() + (sl.getHeight() - lh) / 2, 0xFFFFFFFF);
+                }
+                default -> {
+                }
+            }
+        }
     }
 
 
@@ -260,7 +351,16 @@ public class IsoMapConfigScreen extends Screen {
             graphics.fill(r[0], r[1], r[2], r[3], 0x90000000);
         }
 
+        for (var c : this.children()) {
+            if (c instanceof Checkbox || !(c instanceof AbstractWidget wdg)) continue;
+            drawRainbowGlow(graphics, wdg.getX(), wdg.getY(), wdg.getWidth(), wdg.getHeight());
+        }
+        for (int[] r : plates) {
+            drawRainbowGlow(graphics, r[0], r[1], r[2] - r[0], r[3] - r[1]);
+        }
+
         super.extractRenderState(graphics, mouseX, mouseY, delta);
+        drawWidgetTexts(graphics);
 
         int textX = margin + iconSize + 10;
         int lineH = this.font.lineHeight + 2;
@@ -279,6 +379,13 @@ public class IsoMapConfigScreen extends Screen {
     //Saves settings
     @Override
     public void onClose() {
+        IsoMapConfig.maxRadius = pendingMaxRadius;
+        IsoMapConfig.minSectionedYBlock = pendingMinY;
+        IsoMapConfig.maxSectionedYBlock = Math.max(pendingMinY + 1, pendingMaxY);
+        IsoMapConfig.direction = pendingDirection;
+        IsoMapConfig.brightness = pendingBrightness;
+        IsoMapConfig.workersPerCell = pendingWorkers;
+        IsoMapConfig.waterTint = pendingWaterTint;
         IsoMapConfig.save();
         this.minecraft.setScreenAndShow(parent);
     }

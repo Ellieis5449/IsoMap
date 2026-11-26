@@ -4,7 +4,9 @@ import com.mojang.blaze3d.platform.InputConstants;
 import lgbt.elizabeth.isomap.client.config.IsoMapConfig;
 import lgbt.elizabeth.isomap.client.data.CreateChunkFile;
 import lgbt.elizabeth.isomap.client.data.CreateTileImage;
+import lgbt.elizabeth.isomap.client.data.OrganizeData;
 import lgbt.elizabeth.isomap.client.render.MapScreen;
+import lgbt.elizabeth.isomap.client.render.MapSession;
 import lgbt.elizabeth.isomap.mixin.client.BiomeManagerAccessor;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -17,6 +19,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.packs.PackType;
@@ -31,7 +34,40 @@ public class IsomapClient implements ClientModInitializer {
 
     private int tickCounter = 0;
 
-    private final AtomicBoolean rendering = new AtomicBoolean(false);
+    private static final AtomicBoolean rendering = new AtomicBoolean(false);
+    public static final java.util.concurrent.atomic.AtomicInteger saveGen = new java.util.concurrent.atomic.AtomicInteger();
+
+    private static volatile int wantCx, wantCz;
+    private static final AtomicBoolean wanted = new AtomicBoolean(false);
+    private int lastSaveCx = 0, lastSaveCz = 0;
+    private boolean hasSaved = false;
+
+    public static boolean isSaving() { return rendering.get(); }
+
+    public static void requestSave(int chunkX, int chunkZ) {
+        wantCx = chunkX;
+        wantCz = chunkZ;
+        wanted.set(true);
+        if (!rendering.compareAndSet(false, true)) return;
+        Thread t = new Thread(() -> {
+            try {
+                while (wanted.getAndSet(false)) {
+                    try {
+                        CreateChunkFile.saveRenderDist(wantCx, wantCz, modVer);
+                    } catch (Throwable e) {
+                        e.printStackTrace();
+                    } finally {
+                        saveGen.incrementAndGet();
+                    }
+                }
+            } finally {
+                rendering.set(false);
+                if (wanted.get()) requestSave(wantCx, wantCz);
+            }
+        });
+        t.setDaemon(true);
+        t.start();
+    }
 
     public static final float modVer = parseVersion(
             FabricLoader.getInstance()
@@ -50,6 +86,16 @@ public class IsomapClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+
+        Path configDirectory = FabricLoader.getInstance().getConfigDir();
+        Path blockIndexFile = configDirectory.resolve("IsoMap").resolve("block_index.json");
+        Path biomeIndexFile = configDirectory.resolve("IsoMap").resolve("biome_index.json");
+
+        try {
+            OrganizeData.loadBlockIds(blockIndexFile);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
 
         ResourceLoader.get(PackType.CLIENT_RESOURCES).registerReloadListener(
                 Identifier.fromNamespaceAndPath("isomap", "tileset"),
@@ -83,9 +129,17 @@ public class IsomapClient implements ClientModInitializer {
 
         ClientPlayConnectionEvents.JOIN.register((_, _, client) -> {
             tickCounter = 0;
+            hasSaved = false;
 
-            if (client.level != null) {
-                CreateChunkFile.getMaxYSection(client.level);
+            ClientLevel level = client.level;
+            if (level != null) {
+                CreateChunkFile.getMaxYSection(level);
+
+                try {
+                    OrganizeData.loadBiomeIds(biomeIndexFile, level.registryAccess().lookupOrThrow(Registries.BIOME));
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
             }
         });
 
@@ -95,31 +149,23 @@ public class IsomapClient implements ClientModInitializer {
                 client.setScreenAndShow(new MapScreen(Component.literal("IsoMap")));
             }
 
+            MapSession.clientTick(client);
+
             if (client.level == null) return;
 
-            Minecraft mc = Minecraft.getInstance();
-            LocalPlayer player = mc.player;
+            LocalPlayer player = client.player;
             if (player == null) return;
             BlockPos pos = player.blockPosition();
-
-            int chunkX = pos.getX() >> 4;
-            int chunkZ = pos.getZ() >> 4;
+            int cx = pos.getX() >> 4, cz = pos.getZ() >> 4;
 
             tickCounter++;
-            if (tickCounter >= (IsoMapConfig.saveDelay*20)) {
+            boolean moved = !hasSaved || Math.max(Math.abs(cx - lastSaveCx), Math.abs(cz - lastSaveCz)) >= 2;
+            if (moved || tickCounter >= (IsoMapConfig.saveDelay * 20)) {
                 tickCounter = 0;
-
-                if (rendering.compareAndSet(false, true)) {
-                    Thread t = new Thread(() -> {
-                        try {
-                            CreateChunkFile.saveRenderDist(chunkX, chunkZ, modVer);
-                        } finally {
-                            rendering.set(false);
-                        }
-                    });
-                    t.setDaemon(true);
-                    t.start();
-                }
+                hasSaved = true;
+                lastSaveCx = cx;
+                lastSaveCz = cz;
+                requestSave(cx, cz);
             }
         });
     }
@@ -135,10 +181,10 @@ public class IsomapClient implements ClientModInitializer {
 
     private static void makeDir() throws IOException {
         Path configDirectory = FabricLoader.getInstance().getConfigDir();
-        Path myModFolder = configDirectory.resolve("IsoMap");
+        Path isoMapFolder = configDirectory.resolve("IsoMap");
 
-        if (!Files.exists(myModFolder)) {
-            Files.createDirectories(myModFolder);
+        if (!Files.exists(isoMapFolder)) {
+            Files.createDirectories(isoMapFolder);
         }
     }
 }
