@@ -146,7 +146,7 @@ public class CreateTileImage {
         else if (block instanceof ButtonBlock) s.face(tex, 1, 1, 1, 1, 1, 1, 1, 0);
         else if (block instanceof LeverBlock) s.face(tex, 1, 0, 1, 1, 7, 7, 1, 0);
         else if (block instanceof LadderBlock || block instanceof EndRodBlock) s.face(tex, 1, 2, 2, 2, FRONT);
-        else if (block instanceof RedStoneWireBlock) s.redstoneWire(tex);
+        else if (block instanceof RedstoneWireBlock) s.redstoneWire(tex);
         else if (block instanceof RepeaterBlock || block instanceof ComparatorBlock) s.face(tex, 1, 2, 2, 2, 7, 7, 1, 0);
         else if (block instanceof IronBarsBlock) s.fillAverage(tex, 1, 1, 2, 2, 0);
         else if (block instanceof ChainBlock) s.fillAverage(tex, 1, 1, 1, 2, 0);
