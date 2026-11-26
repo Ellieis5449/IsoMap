@@ -551,6 +551,8 @@ public final class MapSession {
                                 case 1  -> bm[bid].getGrassColor(originX + sx, originZ + sz);
                                 case 2  -> fC[bid];
                                 case 4  -> dC[bid];
+                                case 5  -> 0x619961;
+                                case 6  -> 0x80A755;
                                 default -> wC[bid];
                             };
                             tint = 0xFF000000 | rgb;
@@ -626,9 +628,14 @@ public final class MapSession {
                     || p.equals("attached_melon_stem") || p.equals("attached_pumpkin_stem")
                     || p.equals("melon_stem") || p.equals("pumpkin_stem")) {
                 t = 1;
+            } else if (p.equals("spruce_leaves")) {
+                t = 5;
+            } else if (p.equals("birch_leaves")) {
+                t = 6;
             } else if ((p.endsWith("_leaves")
                     && !p.equals("cherry_leaves") && !p.equals("pale_oak_leaves")
-                    && !p.equals("azalea_leaves") && !p.equals("flowering_azalea_leaves"))
+                    && !p.equals("azalea_leaves") && !p.equals("flowering_azalea_leaves")
+                    && !p.contains("poplar"))
                     || p.equals("vine") || p.equals("lily_pad")) {
                 t = 2;
             } else if (p.equals("water") || p.equals("bubble_column") || p.equals("water_cauldron")) {
